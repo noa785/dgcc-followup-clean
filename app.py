@@ -1,13 +1,12 @@
-# app.py — DGCC Follow-up Manager (original + infinite tasks)
-# -----------------------------------------------------------
+# app.py — DGCC Follow-up Manager (infinite deliverables, tasks limited to 5)
+# ---------------------------------------------------------------------------
 # Streamlit single-file app: create + manage Deliverables and Tasks.
-# - Create form lives in an expander (short page)
+# - Create section: add/remove as MANY deliverables as needed
+# - Each deliverable: up to 5 tasks (title, status, priority, hours, optional due date+time, notes)
 # - Filters: Term / Owner / Search + pagination
 # - Per-deliverable downloads (CSV) + global filtered downloads (CSV/Excel)
 # - Edit & Delete (with modal fallback for older Streamlit)
-# - Reliable calendar (date) + time picker per task (stored as datetime)
 # - No external DB; everything is kept in session_state
-# - NEW: Infinite tasks (Add/Remove) in Create and Edit
 
 from __future__ import annotations
 
@@ -28,7 +27,6 @@ st.set_page_config(page_title="DGCC Follow-up Manager", page_icon="🗂", layout
 st.markdown(
     """
 <style>
-/* Tighter, cleaner page */
 .block-container { max-width: 1100px; }
 .stExpander { border: 1px solid #e5e7eb; border-radius: 12px; }
 [data-testid="stForm"] .stTextInput,
@@ -166,100 +164,14 @@ class Deliverable:
 def ensure_state():
     if "deliverables" not in st.session_state:
         st.session_state["deliverables"] = []
-    # NEW: counters for how many task rows to draw
-    st.session_state.setdefault("create_task_count", 3)  # default rows in Create
+
+    # How many deliverable blocks are visible in Create section
+    st.session_state.setdefault("create_deliv_count", 1)
 
 ensure_state()
 
 
-# ------------------------ Infinite-task helpers ---------------------
-
-def render_task_controls(count_key: str, base_key: str, min_rows: int = 1, max_rows: int = 50):
-    """
-    Add/Remove buttons that change how many task rows are rendered.
-    These live outside submit buttons to avoid Streamlit form errors.
-    """
-    n = st.session_state.get(count_key, min_rows)
-    c1, c2, _ = st.columns([1, 1, 6])
-    with c1:
-        if st.button("Add Task", key=f"{base_key}_add"):
-            st.session_state[count_key] = min(n + 1, max_rows)
-            _rerun()
-    with c2:
-        if st.button("Remove Last Task", key=f"{base_key}_rem", disabled=n <= min_rows):
-            st.session_state[count_key] = max(n - 1, min_rows)
-            _rerun()
-
-
-def render_task_rows(n: int, base_key: str, existing: Optional[List[Dict]] = None) -> List[Dict]:
-    """
-    Renders n task rows (using the original controls, including the 'Has due date?' checkbox).
-    Returns a list of task dicts (skips rows where title is blank).
-    """
-    existing = existing or []
-    tasks: List[Dict] = []
-    for i in range(1, n + 1):
-        initial = next((t for t in existing if t.get("row") == i), None)
-
-        st.markdown(f"#### Task {i} — title")
-        title = st.text_input(
-            f"Task {i} — title",
-            value=(initial or {}).get("title", ""),
-            key=f"{base_key}_t{i}_title",
-            label_visibility="collapsed",
-            placeholder="Task title",
-        )
-        c1, c2, c3 = st.columns([1, 1, 1])
-        with c1:
-            status = st.selectbox(
-                "Status",
-                STATUS_OPTS,
-                index=(STATUS_OPTS.index((initial or {}).get("status"))
-                       if (initial or {}).get("status") in STATUS_OPTS else 0),
-                key=f"{base_key}_t{i}_status",
-            )
-        with c2:
-            priority = st.selectbox(
-                "Priority",
-                PRIORITY_OPTS,
-                index=(PRIORITY_OPTS.index((initial or {}).get("priority"))
-                       if (initial or {}).get("priority") in PRIORITY_OPTS else 1),
-                key=f"{base_key}_t{i}_priority",
-            )
-        with c3:
-            hours = st.number_input(
-                "Hours",
-                min_value=0.0,
-                step=0.5,
-                value=float((initial or {}).get("hours") or 0),
-                key=f"{base_key}_t{i}_hours",
-            )
-
-        has_due, due_at = task_due_controls(i, initial_dt=(initial or {}).get("due_at"), keyp=base_key)
-
-        notes = st.text_area(
-            f"Notes {i}",
-            value=(initial or {}).get("notes", ""),
-            key=f"{base_key}_t{i}_notes",
-        )
-
-        if title.strip():
-            tasks.append(
-                {
-                    "row": i,
-                    "title": title.strip(),
-                    "status": status,
-                    "priority": priority,
-                    "hours": float(hours) if hours not in ("", None) else None,
-                    "due_at": due_at if has_due else None,
-                    "notes": notes.strip(),
-                }
-            )
-        st.markdown("<hr/>", unsafe_allow_html=True)
-    return tasks
-
-
-# ------------------------------ Exports -----------------------------
+# --------------------------- Export helpers -------------------------
 
 def build_global_tables(items: List[Dict]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Return (deliverables_df, tasks_df, flattened_df) for a list of deliverables."""
@@ -418,47 +330,130 @@ def confirm_modal(prompt: str, state_key: str, match_id: Optional[str] = None) -
 
 # ----------------------------- UI building --------------------------
 
-def create_deliverable_form():
-    # Controls to change number of task rows for CREATE (outside submit)
-    st.markdown("### Tasks")
-    render_task_controls("create_task_count", base_key="create_tasks")
+def build_task_row(i: int, keyp: str, initial: Optional[Dict] = None) -> Optional[Dict]:
+    """Render one task row (max 5 per deliverable) and return task dict (or None if no title)."""
+    initial = initial or {}
+    st.markdown(f"#### Task {i} — title")
+    title = st.text_input(
+        f"Task {i} — title",
+        value=initial.get("title", ""),
+        key=f"{keyp}_t{i}_title",
+        label_visibility="collapsed",
+        placeholder="Task title",
+    )
+    c1, c2, c3 = st.columns([1, 1, 1])
+    with c1:
+        status = st.selectbox(
+            "Status",
+            STATUS_OPTS,
+            index=(STATUS_OPTS.index(initial.get("status")) if initial.get("status") in STATUS_OPTS else 0),
+            key=f"{keyp}_t{i}_status",
+        )
+    with c2:
+        priority = st.selectbox(
+            "Priority",
+            PRIORITY_OPTS,
+            index=(PRIORITY_OPTS.index(initial.get("priority")) if initial.get("priority") in PRIORITY_OPTS else 1),
+            key=f"{keyp}_t{i}_priority",
+        )
+    with c3:
+        hours = st.number_input("Hours", min_value=0.0, step=0.5, value=float(initial.get("hours") or 0), key=f"{keyp}_t{i}_hours")
 
-    with st.form("create_deliv", clear_on_submit=True):
-        st.subheader("Create deliverable")
+    has_due, due_at = task_due_controls(i, initial_dt=initial.get("due_at"), keyp=keyp)
 
-        d_title = st.text_input("Deliverable title *", "")
-        c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
-        with c1:
-            d_owner = st.text_input("Owner")
-        with c2:
-            d_unit = st.text_input("Unit")
-        with c3:
-            d_term = st.text_input("Term", help="e.g., 2025-1 or Fall 2025")
-        with c4:
-            d_notes = st.text_area("Deliverable notes", height=80)
+    notes = st.text_area(f"Notes {i}", value=initial.get("notes", ""), key=f"{keyp}_t{i}_notes")
 
-        st.markdown("---")
-        n_rows = st.session_state.get("create_task_count", 3)
-        tasks: List[Dict] = render_task_rows(n_rows, base_key="c")
+    if not title.strip():
+        return None
+    return {
+        "row": i,
+        "title": title.strip(),
+        "status": status,
+        "priority": priority,
+        "hours": float(hours) if hours not in ("", None) else None,
+        "due_at": due_at if has_due else None,
+        "notes": notes.strip(),
+    }
 
-        submitted = st.form_submit_button("Save deliverable")
-        if submitted:
-            if not d_title.strip():
-                st.error("Please enter a deliverable title.")
-                return
-            new_deliv = {
-                "id": generate_id(),
-                "title": d_title.strip(),
-                "owner": d_owner.strip(),
-                "unit": d_unit.strip(),
-                "term": d_term.strip(),
-                "notes": d_notes.strip(),
-                "created_at": datetime.utcnow().isoformat(timespec="seconds"),
-                "tasks": tasks,
-            }
-            save_deliverable(new_deliv)
-            st.success("Deliverable added.")
+
+def create_deliverables_section():
+    # 1) Controls to add/remove deliverable blocks (outside the form)
+    c1, c2, _ = st.columns([1, 1, 6])
+    with c1:
+        if st.button("➕ Add Deliverable", key="add_deliv"):
+            st.session_state["create_deliv_count"] = min(st.session_state["create_deliv_count"] + 1, 50)
             _rerun()
+    with c2:
+        if st.button("➖ Remove Last Deliverable", key="rem_deliv", disabled=st.session_state["create_deliv_count"] <= 1):
+            st.session_state["create_deliv_count"] = max(st.session_state["create_deliv_count"] - 1, 1)
+            _rerun()
+    st.caption(f"Deliverable blocks visible: **{st.session_state['create_deliv_count']}**")
+    st.markdown("---")
+
+    # 2) Single form that contains ALL deliverable blocks
+    with st.form("create_batch", clear_on_submit=True):
+        st.subheader("Create deliverables")
+        all_new: List[Dict] = []
+
+        for i in range(1, st.session_state["create_deliv_count"] + 1):
+            st.markdown(f"## Deliverable {i}")
+
+            d_title = st.text_input(f"[D{i}] Deliverable title *", key=f"D{i}_title")
+            c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
+            with c1:
+                d_owner = st.text_input(f"[D{i}] Owner", key=f"D{i}_owner")
+            with c2:
+                d_unit = st.text_input(f"[D{i}] Unit", key=f"D{i}_unit")
+            with c3:
+                d_term = st.text_input(f"[D{i}] Term", key=f"D{i}_term", help="e.g., 2025-1 or Fall 2025")
+            with c4:
+                d_notes = st.text_area(f"[D{i}] Deliverable notes", key=f"D{i}_notes", height=80)
+
+            st.markdown("---")
+            st.markdown(f"### [D{i}] Tasks (up to 5)")
+            tasks: List[Dict] = []
+            for trow in range(1, 6):  # FIXED: only 1..5 tasks per deliverable
+                with st.container():
+                    t = build_task_row(trow, keyp=f"D{i}", initial=None)
+                    if t:
+                        tasks.append(t)
+                    st.markdown("<hr/>", unsafe_allow_html=True)
+
+            all_new.append({
+                "_title": d_title, "_owner": d_owner, "_unit": d_unit, "_term": d_term, "_notes": d_notes,
+                "_tasks": tasks,
+            })
+            st.markdown("---")
+
+        submitted = st.form_submit_button("Save all deliverables")
+        if submitted:
+            any_saved = False
+            for block in all_new:
+                # Skip fully empty blocks
+                if not (block["_title"] or block["_owner"] or block["_unit"] or block["_term"] or block["_notes"] or block["_tasks"]):
+                    continue
+                if not (block["_title"] or "").strip():
+                    st.error("Each non-empty deliverable needs a Title. Fill it or leave the block empty.")
+                    return
+                new_deliv = {
+                    "id": generate_id(),
+                    "title": block["_title"].strip(),
+                    "owner": (block["_owner"] or "").strip(),
+                    "unit": (block["_unit"] or "").strip(),
+                    "term": (block["_term"] or "").strip(),
+                    "notes": (block["_notes"] or "").strip(),
+                    "created_at": datetime.utcnow().isoformat(timespec="seconds"),
+                    "tasks": block["_tasks"],  # already max 5
+                }
+                save_deliverable(new_deliv)
+                any_saved = True
+            if any_saved:
+                st.success("Deliverables added.")
+                # Reset to a single block after save
+                st.session_state["create_deliv_count"] = 1
+                _rerun()
+            else:
+                st.info("Nothing to save — all blocks were empty.")
 
 
 def edit_deliverable_modal(deliv: Dict):
@@ -478,15 +473,16 @@ def edit_deliverable_modal(deliv: Dict):
                 d_notes = st.text_area("Deliverable notes", value=deliv.get("notes", ""), height=80, key=f"e_{deliv['id']}_notes")
 
             st.markdown("---")
-            st.markdown("### Tasks")
-            # Per-deliverable counter for EDIT
-            cnt_key = f"edit_{deliv['id']}_task_count"
-            if cnt_key not in st.session_state:
-                st.session_state[cnt_key] = max(1, len(deliv.get("tasks", []) or []))
-
-            render_task_controls(cnt_key, base_key=f"edit_{deliv['id']}_tasks")
+            st.markdown("### Tasks (up to 5)")
             existing = deliv.get("tasks", []) or []
-            tasks: List[Dict] = render_task_rows(st.session_state[cnt_key], base_key=f"e_{deliv['id']}", existing=existing)
+            tasks: List[Dict] = []
+            for i in range(1, 6):
+                initial = next((t for t in existing if t.get("row") == i), None)
+                with st.container():
+                    t = build_task_row(i, keyp=f"e_{deliv['id']}", initial=initial)
+                    if t:
+                        tasks.append(t)
+                    st.markdown("<hr/>", unsafe_allow_html=True)
 
             btns = st.columns(2)
             with btns[0]:
@@ -507,15 +503,12 @@ def edit_deliverable_modal(deliv: Dict):
                     "notes": d_notes.strip(),
                     "created_at": deliv.get("created_at")
                     or datetime.utcnow().isoformat(timespec="seconds"),
-                    "tasks": tasks,
+                    "tasks": tasks[:5],  # enforce max 5
                 }
                 update_deliverable(updated)
                 st.success("Updated.")
-                # clear the edit counter for this deliverable
-                st.session_state.pop(cnt_key, None)
                 _rerun()
             if cancel:
-                st.session_state.pop(cnt_key, None)
                 _rerun()
 
 
@@ -567,9 +560,8 @@ def show_deliverable_card(deliv: Dict):
 
 # ------------------------------- Layout -----------------------------
 
-# Short create form in an expander
-with st.expander("Create deliverable", expanded=False):
-    create_deliverable_form()
+with st.expander("Create deliverables (add as many as you need)", expanded=False):
+    create_deliverables_section()
 
 st.subheader("Deliverables")
 
