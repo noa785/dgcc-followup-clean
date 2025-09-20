@@ -1,21 +1,25 @@
-# app.py — DGCC Follow-up (single-file)
-# Features:
-# - 5 tasks per deliverable (no unit on tasks)
-# - Date pickers always visible; disabled until "Has due date?" is checked
-# - Divider between Notes and Tasks, and between each Task row
-# - "➕ Add another deliverable form" at top and after each form
-# - Collapsible deliverable cards (▸ arrow)
-# - Per-deliverable downloads: SUMMARY-only and FULL (Deliverable + Tasks + Summary)
+# app.py — DGCC Follow-up (single-file, organized)
+# Highlights:
+# - Clean form: deliverable + 5 tasks, with visible date pickers (disabled until "Has due date?")
+# - Divider between Notes and Tasks, and between each Task row in the form
+# - "➕ Add another deliverable form" button shown
+#     (1) under the Create section header, and
+#     (2) again just above the Deliverables list
+# - Deliverables shown as collapsible cards
+# - Inside each deliverable card: **exactly 5 collapsible task arrows (▸)** in order
+# - Downloads per deliverable: SUMMARY only, and FULL workbook (Deliverable + Tasks + Summary)
 # - Global downloads: ALL deliverables (+Tasks) and GLOBAL SUMMARY (flattened)
+# - Uses st.rerun() (no deprecated experimental_rerun)
 
 import sqlite3
 import io
 import datetime as dt
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 import pandas as pd
 import streamlit as st
+
 
 # ---------- Page ----------
 st.set_page_config(page_title="DGCC Follow-up (Clean)", page_icon="🗂️", layout="wide")
@@ -171,7 +175,7 @@ def delete_deliverable(deliverable_id: int):
 
 
 # ---------- Utils ----------
-def _iso_date_or_none(enabled: bool, val):
+def _iso_date_or_none(enabled: bool, val: Optional[dt.date]) -> Optional[str]:
     if not enabled or not val:
         return None
     if isinstance(val, dt.date):
@@ -234,11 +238,13 @@ with st.sidebar:
 if "form_count" not in st.session_state:
     st.session_state.form_count = 1
 
+# ===== Create Section =====
 st.subheader("Create deliverable & 5 tasks each")
 
-# "+" button at the top
-if st.button("➕ Add another deliverable form", help="Add another deliverable + 5 tasks", key="add_top"):
+# "+" button at the very top of the form area
+if st.button("➕ Add another deliverable form", key="add_top"):
     st.session_state.form_count += 1
+    st.rerun()
 
 saved_any = False
 
@@ -257,20 +263,17 @@ for form_idx in range(st.session_state.form_count):
             d_category = st.text_input("Category", placeholder="Audit / Policy / System", key=f"cat_{form_idx}")
             d_due_enabled = st.checkbox("Has due date?", key=f"due_on_{form_idx}")
         with c3:
-            # date box is always visible; disabled until checked
             d_due = st.date_input("Due date", value=dt.date.today(), key=f"due_{form_idx}", disabled=not d_due_enabled)
             d_tags = st.text_input("Tags (comma-separated)", key=f"tags_{form_idx}")
             d_hours = st.number_input("Expected hours", min_value=0.0, step=0.5, key=f"hrs_{form_idx}")
         d_notes = st.text_area("Notes", height=90, key=f"notes_{form_idx}")
 
-        # Divider + caption before the task section
         st.divider()
-        st.markdown("**Tasks (5 max)**  \n_(No unit per task; each task is shown later as a single space-separated line.)_")
+        st.markdown("**Tasks (5 max)**  \n_(No unit per task; each task will be shown later as 5 collapsible arrows.)_")
 
         task_rows = []
         for i in range(1, 6):
-            # 4 columns: title/owner | status/priority | due | hours/tags/blocked
-            t1, t2, t3, t4 = st.columns([2, 1.2, 1.3, 1.7], gap="small")
+            t1, t2, t3, t4 = st.columns([2.1, 1.2, 1.35, 1.8], gap="small")
             with t1:
                 t_title = st.text_input(f"Task {i} title", key=f"t{form_idx}_{i}_title")
                 t_owner = st.text_input(f"Owner {i}", key=f"t{form_idx}_{i}_owner")
@@ -299,8 +302,6 @@ for form_idx in range(st.session_state.form_count):
                     notes=t_notes or None,
                 )
             )
-
-            # divider between tasks (except after the last one)
             if i < 5:
                 st.markdown("<hr style='margin:8px 0; opacity:0.35;'/>", unsafe_allow_html=True)
 
@@ -330,16 +331,13 @@ for form_idx in range(st.session_state.form_count):
                 st.success(f"Saved deliverable #{did} with {created} task(s).")
                 saved_any = True
 
-    # "+" button again after each form
-    if st.button("➕ Add another deliverable form", key=f"add_after_{form_idx}"):
-        st.session_state.form_count += 1
-        try:
-            st.rerun()
-        except Exception:
-            st.experimental_rerun()
-
 if saved_any:
     st.balloons()
+
+# A second "+" button **above** the Deliverables list for better flow
+if st.button("➕ Add another deliverable form", key="add_before_list"):
+    st.session_state.form_count += 1
+    st.rerun()
 
 # ---------- Display ----------
 st.subheader("Deliverables (click the ▸ arrow to expand)")
@@ -380,9 +378,10 @@ if dels:
                 if st.button(f"🗑️ Delete #{d['id']}", key=f"del_{d['id']}"):
                     delete_deliverable(d["id"])
                     st.warning("Deleted. Please refresh.")
+
             st.markdown("---")
 
-            # ===== Summary line =====
+            # ===== Quick snapshot line =====
             info_parts = []
             for label, key in [("Status", "status"), ("Priority", "priority"),
                                ("Due", "due_date"), ("Owner", "owner"),
@@ -391,4 +390,83 @@ if dels:
                     info_parts.append(f"**{label}:** {d[key]}")
             st.markdown(" • ".join(info_parts) if info_parts else "_No meta info_")
 
-            # ===
+            st.markdown("—")
+
+            # ===== Tasks as 5 collapsible arrows =====
+            # Slot tasks into fixed 5 arrows; show 'Empty slot' if not present.
+            for i in range(5):
+                t = tasks[i] if i < len(tasks) else None
+                header = f"Task {i+1}"
+                if t and t.get("task"):
+                    header = f"Task {i+1} — {t['task']}"
+                with st.expander(header, expanded=False):
+                    if not t:
+                        st.info("Empty task slot.")
+                    else:
+                        # neat meta grid
+                        mc1, mc2, mc3 = st.columns(3)
+                        with mc1:
+                            st.write("**Owner:**", t.get("owner") or "—")
+                            st.write("**Status:**", t.get("status") or "—")
+                        with mc2:
+                            st.write("**Priority:**", t.get("priority") or "—")
+                            st.write("**Due:**", t.get("due_date") or "—")
+                        with mc3:
+                            st.write("**Hours:**", t.get("expected_hours") or "—")
+                            st.write("**Tags:**", t.get("tags") or "—")
+                        st.write("**Blocked reason:**", t.get("blocked_reason") or "—")
+                        st.write("**Notes:**")
+                        st.code(t.get("notes") or "", language="text")
+
+            st.markdown("—")
+            # Also show the “single-line” view if you want quick copy
+            if tasks:
+                st.markdown("**Compact lines** (space-separated):")
+                lines = [_task_line(t) for t in tasks]
+                st.code("\n".join(lines), language="text")
+            else:
+                st.info("No tasks saved.")
+
+    # ===== Global table + exports =====
+    st.markdown("---")
+    st.subheader("All deliverables (table)")
+    df_all = pd.DataFrame(dels)
+    if "due_date" in df_all:
+        def flag(due):
+            try:
+                if not due:
+                    return ""
+                delta = (dt.date.fromisoformat(due) - dt.date.today()).days
+                return "⚠️" if 0 <= delta <= due_window else ""
+            except Exception:
+                return ""
+        df_all["due_soon"] = df_all["due_date"].map(flag)
+        cols = [
+            "due_soon","id","unit","name","owner","owner_email","status","priority",
+            "category","tags","expected_hours","start_date","due_date","last_update","notes"
+        ]
+        cols = [c for c in cols if c in df_all.columns]
+    else:
+        cols = list(df_all.columns)
+
+    st.dataframe(df_all[cols], use_container_width=True)
+    _download_excel_button(
+        "deliverables.xlsx",
+        {"Deliverables": df_all, "Tasks": pd.DataFrame(fetch_tasks_flat())},
+        "⬇️ Download ALL deliverables (.xlsx)",
+    )
+
+    # ---- GLOBAL SUMMARY (flattened) ----
+    all_rows = []
+    for d in dels:
+        ts = fetch_tasks_for(d["id"])
+        all_rows.append(_summary_df(d, ts))
+    df_global_summary = pd.concat(all_rows, ignore_index=True) if all_rows else pd.DataFrame()
+
+    _download_excel_button(
+        "GLOBAL_SUMMARY.xlsx",
+        {"Summary": df_global_summary},
+        "⬇️ Download GLOBAL SUMMARY (.xlsx)",
+    )
+else:
+    st.info("No deliverables yet — add one above, then the ▸ arrow will appear for each.")
