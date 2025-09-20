@@ -1,10 +1,12 @@
 # app.py — DGCC Follow-up (single-file)
-# Fixes added:
-# - Date picker ALWAYS visible (disabled until "Has due date?" is checked)
+# Features:
+# - 5 tasks per deliverable (no unit on tasks)
+# - Date pickers always visible; disabled until "Has due date?" is checked
 # - Divider between Notes and Tasks, and between each Task row
-# - "+" button to add more deliverable forms at top AND after each form
-# - Collapsible deliverable cards with per-deliverable Excel download
-# - Global Excel download for all deliverables + tasks
+# - "➕ Add another deliverable form" at top and after each form
+# - Collapsible deliverable cards (▸ arrow)
+# - Per-deliverable downloads: SUMMARY-only and FULL (Deliverable + Tasks + Summary)
+# - Global downloads: ALL deliverables (+Tasks) and GLOBAL SUMMARY (flattened)
 
 import sqlite3
 import io
@@ -16,8 +18,8 @@ import pandas as pd
 import streamlit as st
 
 # ---------- Page ----------
-st.set_page_config(page_title="DGCC Follow-up Manager", page_icon="🗂️", layout="wide")
-st.title("DGCC Follow-up")
+st.set_page_config(page_title="DGCC Follow-up (Clean)", page_icon="🗂️", layout="wide")
+st.title("DGCC Follow-up (Clean)")
 
 DB_PATH = Path("followup.db")
 STATUSES = ["Not started", "In progress", "Blocked", "Done"]
@@ -201,6 +203,25 @@ def _task_line(task_row: Dict[str, Any]) -> str:
     return " ".join(str(x).strip() for x in fields if x not in (None, "", "None"))
 
 
+def _summary_df(deliv: Dict[str, Any], tasks: List[Dict[str, Any]]) -> pd.DataFrame:
+    """Flatten deliverable + tasks into one table (one row per task; if no tasks, one row with NaNs)."""
+    d_cols = ["id","unit","name","owner","owner_email","status","priority","category","tags",
+              "expected_hours","start_date","due_date","last_update","notes"]
+    t_cols = ["id","task","owner","status","priority","due_date","expected_hours","tags",
+              "blocked_reason","notes","start_date","last_update"]
+
+    if tasks:
+        rows = []
+        for t in tasks:
+            row = {f"d_{k}": deliv.get(k) for k in d_cols}
+            row.update({f"t_{k}": t.get(k) for k in t_cols})
+            rows.append(row)
+        return pd.DataFrame(rows)
+    # No tasks: single row with just the deliverable fields
+    row = {f"d_{k}": deliv.get(k) for k in d_cols}
+    return pd.DataFrame([row])
+
+
 # ---------- App start ----------
 init_db()
 
@@ -236,7 +257,7 @@ for form_idx in range(st.session_state.form_count):
             d_category = st.text_input("Category", placeholder="Audit / Policy / System", key=f"cat_{form_idx}")
             d_due_enabled = st.checkbox("Has due date?", key=f"due_on_{form_idx}")
         with c3:
-            # Always show date box; enable only if due is checked
+            # date box is always visible; disabled until checked
             d_due = st.date_input("Due date", value=dt.date.today(), key=f"due_{form_idx}", disabled=not d_due_enabled)
             d_tags = st.text_input("Tags (comma-separated)", key=f"tags_{form_idx}")
             d_hours = st.number_input("Expected hours", min_value=0.0, step=0.5, key=f"hrs_{form_idx}")
@@ -279,7 +300,7 @@ for form_idx in range(st.session_state.form_count):
                 )
             )
 
-            # ——— divider between tasks (except after the last one)
+            # divider between tasks (except after the last one)
             if i < 5:
                 st.markdown("<hr style='margin:8px 0; opacity:0.35;'/>", unsafe_allow_html=True)
 
@@ -309,10 +330,13 @@ for form_idx in range(st.session_state.form_count):
                 st.success(f"Saved deliverable #{did} with {created} task(s).")
                 saved_any = True
 
-    # "+" button again after each form (easier to add more)
+    # "+" button again after each form
     if st.button("➕ Add another deliverable form", key=f"add_after_{form_idx}"):
         st.session_state.form_count += 1
-        st.experimental_rerun()
+        try:
+            st.rerun()
+        except Exception:
+            st.experimental_rerun()
 
 if saved_any:
     st.balloons()
@@ -329,18 +353,27 @@ if dels:
             title += f'  ({d["unit"]})'
 
         with st.expander(title, expanded=False):
-            # Top actions row: Download + Delete
-            cdl, cdel, _ = st.columns([2, 1.2, 6])
+            # ===== Top actions row: SUMMARY + FULL + Delete =====
+            cdl1, cdl2, cdel, _ = st.columns([2.2, 2.6, 1.2, 5])
+
             df_del = pd.DataFrame([d])
             df_tasks = pd.DataFrame(tasks) if tasks else pd.DataFrame(
                 columns=[
                     "id","deliverable_id","task","owner","status","priority","due_date",
                     "expected_hours","tags","blocked_reason","notes","start_date","last_update"
                 ])
-            with cdl:
+            df_summary = _summary_df(d, tasks)
+
+            with cdl1:
+                _download_excel_button(
+                    f"deliverable_{d['id']}_SUMMARY.xlsx",
+                    {"Summary": df_summary},
+                    "⬇️ Download SUMMARY (.xlsx)",
+                )
+            with cdl2:
                 _download_excel_button(
                     f"deliverable_{d['id']}.xlsx",
-                    {"Deliverable": df_del, "Tasks": df_tasks},
+                    {"Deliverable": df_del, "Tasks": df_tasks, "Summary": df_summary},
                     "⬇️ Download this deliverable (.xlsx)",
                 )
             with cdel:
@@ -349,7 +382,7 @@ if dels:
                     st.warning("Deleted. Please refresh.")
             st.markdown("---")
 
-            # Summary line
+            # ===== Summary line =====
             info_parts = []
             for label, key in [("Status", "status"), ("Priority", "priority"),
                                ("Due", "due_date"), ("Owner", "owner"),
@@ -358,40 +391,4 @@ if dels:
                     info_parts.append(f"**{label}:** {d[key]}")
             st.markdown(" • ".join(info_parts) if info_parts else "_No meta info_")
 
-            # Tasks as space-separated lines
-            if tasks:
-                st.markdown("**Tasks** (each line is fields joined by spaces):")
-                lines = [_task_line(t) for t in tasks]
-                st.code("\n".join(lines), language="text")
-            else:
-                st.info("No tasks yet for this deliverable.")
-
-    # Global table + export
-    st.markdown("---")
-    st.subheader("All deliverables (table)")
-    df_all = pd.DataFrame(dels)
-    if "due_date" in df_all:
-        def flag(due):
-            try:
-                if not due: return ""
-                delta = (dt.date.fromisoformat(due) - dt.date.today()).days
-                return "⚠️" if 0 <= delta <= due_window else ""
-            except Exception:
-                return ""
-        df_all["due_soon"] = df_all["due_date"].map(flag)
-        cols = [
-            "due_soon","id","unit","name","owner","owner_email","status","priority",
-            "category","tags","expected_hours","start_date","due_date","last_update","notes"
-        ]
-        cols = [c for c in cols if c in df_all.columns]
-    else:
-        cols = list(df_all.columns)
-
-    st.dataframe(df_all[cols], use_container_width=True)
-    _download_excel_button(
-        "deliverables.xlsx",
-        {"Deliverables": df_all, "Tasks": pd.DataFrame(fetch_tasks_flat())},
-        "⬇️ Download ALL deliverables (.xlsx)",
-    )
-else:
-    st.info("No deliverables yet — add one above, then the ▸ arrow will appear for each.")
+            # ===
