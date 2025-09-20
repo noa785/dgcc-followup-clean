@@ -1,5 +1,6 @@
-# app.py — DGCC Follow-up Manager (infinite tasks + variables, visible controls)
-# ------------------------------------------------------------------------------
+# app.py — DGCC Follow-up Manager
+# Infinite deliverables + infinite tasks + infinite variables
+# -----------------------------------------------------------
 from __future__ import annotations
 
 import io
@@ -24,7 +25,6 @@ st.markdown(
 [data-testid="stForm"] .stNumberInput,
 [data-testid="stForm"] .stDateInput,
 [data-testid="stForm"] .stTimeInput { margin-bottom: .4rem; }
-.small-note { color:#6b7280; font-size:.85rem; }
 hr { border: none; border-top: 1px solid #eee; margin: .75rem 0; }
 .hint { background:#fff7ed; border:1px solid #fed7aa; padding:.5rem .75rem; border-radius:.5rem; }
 </style>
@@ -33,7 +33,7 @@ hr { border: none; border-top: 1px solid #eee; margin: .75rem 0; }
 )
 st.title("DGCC Follow-up Manager")
 
-# ---------------------- Compatibility & helpers ---------------------
+# ---------------------- Helpers & compatibility --------------------
 def _rerun():
     if hasattr(st, "rerun"):
         st.rerun()
@@ -53,7 +53,7 @@ def ui_modal(title: str):
 def generate_id() -> str:
     return datetime.utcnow().strftime("%y%m%d%H%M%S%f")[-10:]
 
-STATUS_OPTS = ["Not started", "In progress", "Blocked", "Done"]
+STATUS_OPTS   = ["Not started", "In progress", "Blocked", "Done"]
 PRIORITY_OPTS = ["Low", "Medium", "High"]
 
 def split_dt(dt_val) -> Tuple[Optional[date], Optional[time]]:
@@ -76,7 +76,7 @@ def pretty_due(dt_val) -> str:
             return dt_val
     return dt_val.strftime("%Y-%m-%d %H:%M")
 
-# -------------------------- Data structures -------------------------
+# -------------------------- Data structures ------------------------
 @dataclass
 class Task:
     row: int
@@ -99,14 +99,22 @@ class Deliverable:
     tasks: List[Task]
     vars: List[Dict[str, str]]
 
+# ------------------------------ State ------------------------------
 def ensure_state():
     st.session_state.setdefault("deliverables", [])
-    st.session_state.setdefault("create_task_count", 3)  # visible task rows initially
-    st.session_state.setdefault("create_var_count", 1)   # visible variable rows initially
 
+    # Batch-create controls
+    st.session_state.setdefault("create_deliv_count", 1)  # number of deliverable blocks visible
+
+    # For each deliverable block i (1..N) we track its own task/var counts.
+    # We'll initialize lazily when rendering.
 ensure_state()
 
-# ------------------------------ Exports -----------------------------
+def _ensure_block_counts(i: int):
+    st.session_state.setdefault(f"c{i}_task_count", 3)
+    st.session_state.setdefault(f"c{i}_var_count", 1)
+
+# ------------------------------ Exports ----------------------------
 def build_global_tables(items: List[Dict]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     d_rows, t_rows, v_rows = [], [], []
     for d in items:
@@ -136,22 +144,20 @@ def build_global_tables(items: List[Dict]) -> tuple[pd.DataFrame, pd.DataFrame, 
                     "notes": t.get("notes"),
                 }
             )
-        for i, kv in enumerate(d.get("vars", []) or [], start=1):
+        for j, kv in enumerate(d.get("vars", []) or [], start=1):
             v_rows.append(
                 {
                     "deliverable_id": d["id"],
                     "deliverable_title": d.get("title", ""),
-                    "row": i,
+                    "row": j,
                     "name": kv.get("name", ""),
                     "value": kv.get("value", ""),
                 }
             )
-
     df_deliv = pd.DataFrame(d_rows)
     df_tasks = pd.DataFrame(t_rows)
     df_vars  = pd.DataFrame(v_rows)
-
-    df_flat = df_tasks.copy() if len(df_tasks) else pd.DataFrame(
+    df_flat  = df_tasks.copy() if len(df_tasks) else pd.DataFrame(
         columns=["deliverable_id","deliverable_title","row","title","status","priority","hours","due_at","notes"]
     )
     if not len(df_vars):
@@ -182,23 +188,23 @@ def export_tasks_csv(deliv: Dict) -> bytes:
         )
     df = pd.DataFrame(rows); s = io.StringIO(); df.to_csv(s, index=False); return s.getvalue().encode("utf-8")
 
-# ------------------------------ Filters -----------------------------
+# ------------------------------ Filters ----------------------------
 def filter_deliverables(items: List[Dict], term: str, owner: str, query: str) -> List[Dict]:
     term = (term or "").strip().lower(); owner = (owner or "").strip().lower(); query = (query or "").strip().lower()
     out = []
     for d in items:
-        if term and term not in (d.get("term", "").lower()):  continue
-        if owner and owner not in (d.get("owner", "").lower()):  continue
+        if term and term not in (d.get("term","").lower()): continue
+        if owner and owner not in (d.get("owner","").lower()): continue
         hay = " ".join([d.get("title",""), d.get("unit",""), d.get("notes","")]).lower()
-        if query and query not in hay:  continue
+        if query and query not in hay: continue
         out.append(d)
     return out
 
 def paginate(items: List[Dict], page: int, per_page: int) -> Tuple[List[Dict], int]:
-    total = len(items); start = (page - 1) * per_page; end = start + per_page
+    total = len(items); start = (page-1)*per_page; end = start + per_page
     return items[start:end], total
 
-# --------------------------- CRUD operations ------------------------
+# --------------------------- CRUD ops ------------------------------
 def save_deliverable(new_deliv: Dict): st.session_state["deliverables"].append(new_deliv)
 
 def update_deliverable(updated: Dict):
@@ -221,7 +227,7 @@ def confirm_modal(prompt: str, state_key: str, match_id: Optional[str] = None) -
         if no:  st.session_state[state_key] = None; _rerun()
     return False
 
-# ----------------------------- UI helpers ---------------------------
+# ----------------------------- UI pieces ---------------------------
 def task_inputs(i: int, keyp: str, initial: Optional[Dict] = None) -> Optional[Dict]:
     initial = initial or {}
     st.markdown(f"#### Task {i} — title")
@@ -266,7 +272,7 @@ def var_inputs(i: int, keyp: str, initial: Optional[Dict] = None) -> Optional[Di
                              key=f"{keyp}_v{i}_name", placeholder="e.g., Milestone")
     with c2:
         value = st.text_input(f"Variable {i} — value", value=initial.get("value",""),
-                              key=f"{keyp}_v{i}_value", placeholder="e.g., Phase 1")
+                              key=f"{keyp}_v{i}_value", placeholder="e.g., Phase 1 / Link / Budget")
     if not (name or value):
         return None
     return {"name": name.strip(), "value": value.strip()}
@@ -293,7 +299,6 @@ def render_var_rows(n: int, base_key: str, existing: Optional[List[Dict]] = None
     return out
 
 def render_controls(count_key: str, base_key: str, label: str, key_suffix: str, min_rows: int = 1, max_rows: int = 50):
-    """Buttons OUTSIDE forms (key_suffix lets us show a second copy below the form)."""
     n = st.session_state.get(count_key, min_rows)
     c1, c_mid, c2 = st.columns([1,3,1])
     with c1:
@@ -305,58 +310,97 @@ def render_controls(count_key: str, base_key: str, label: str, key_suffix: str, 
         if st.button(f"➖ Remove Last {label}", key=f"{base_key}_{key_suffix}_rem", disabled=n <= min_rows):
             st.session_state[count_key] = max(n - 1, min_rows); _rerun()
 
-# --------------------------- Create / Edit --------------------------
-def create_deliverable_form():
-    # Controls (TOP) — outside the form
-    st.markdown("### Tasks")
-    render_controls("create_task_count", base_key="c_tasks", label="Task", key_suffix="top")
-    st.markdown("### Custom variables")
-    render_controls("create_var_count", base_key="c_vars", label="Variable", key_suffix="top")
-    st.markdown("---")
-
-    with st.form("create_deliv", clear_on_submit=True):
-        st.subheader("Create deliverable")
-        d_title = st.text_input("Deliverable title *", "")
-        c1, c2, c3, c4 = st.columns([1,1,1,2])
-        with c1: d_owner = st.text_input("Owner")
-        with c2: d_unit  = st.text_input("Unit")
-        with c3: d_term  = st.text_input("Term", help="e.g., 2025-1 or Fall 2025")
-        with c4: d_notes = st.text_area("Deliverable notes", height=80)
-
-        st.markdown("---")
-        n_tasks = st.session_state.get("create_task_count", 3)
-        tasks = render_task_rows(n_tasks, base_key="c_tasks", existing=None)
-
-        st.markdown(f"#### Variables ({st.session_state.get('create_var_count',1)})")
-        st.markdown('<div class="hint">Tip: Use variables for any extra fields you need (e.g., Milestone, Budget, Link).</div>', unsafe_allow_html=True)
-        n_vars = st.session_state.get("create_var_count", 1)
-        vars_list = render_var_rows(n_vars, base_key="c_vars", existing=None)
-
-        submitted = st.form_submit_button("Save deliverable")
-        if submitted:
-            if not d_title.strip():
-                st.error("Please enter a deliverable title."); return
-            new_deliv = {
-                "id": generate_id(),
-                "title": d_title.strip(),
-                "owner": d_owner.strip(),
-                "unit": d_unit.strip(),
-                "term": d_term.strip(),
-                "notes": d_notes.strip(),
-                "created_at": datetime.utcnow().isoformat(timespec="seconds"),
-                "tasks": tasks,
-                "vars": vars_list,
-            }
-            save_deliverable(new_deliv)
-            st.success("Deliverable added.")
-            st.session_state["create_task_count"] = 3
-            st.session_state["create_var_count"] = 1
+# ---------------------- Batch CREATE (infinite) --------------------
+def create_deliverables_section():
+    # 1) Top-level controls to add/remove deliverable blocks (outside the form)
+    c1, c2, _ = st.columns([1,1,6])
+    with c1:
+        if st.button("➕ Add Deliverable", key="add_deliv"):
+            st.session_state["create_deliv_count"] = min(st.session_state["create_deliv_count"] + 1, 30)
             _rerun()
-
-    # Controls (BOTTOM) — outside the form but right below variables for visibility
-    render_controls("create_var_count", base_key="c_vars", label="Variable", key_suffix="bottom")
+    with c2:
+        if st.button("➖ Remove Last Deliverable", key="rem_deliv", disabled=st.session_state["create_deliv_count"] <= 1):
+            st.session_state["create_deliv_count"] = max(st.session_state["create_deliv_count"] - 1, 1)
+            _rerun()
+    st.caption(f"Deliverable blocks visible: **{st.session_state['create_deliv_count']}**")
     st.markdown("---")
 
+    # 2) Per-block controls (outside form) for tasks/vars
+    N = st.session_state["create_deliv_count"]
+    for i in range(1, N + 1):
+        _ensure_block_counts(i)
+        st.markdown(f"### Deliverable {i} — controls")
+        render_controls(f"c{i}_task_count", base_key=f"c{i}_tasks", label="Task", key_suffix="top")
+        render_controls(f"c{i}_var_count",  base_key=f"c{i}_vars",  label="Variable", key_suffix="top")
+        st.markdown("---")
+
+    # 3) Single form containing ALL deliverable blocks
+    with st.form("create_batch", clear_on_submit=True):
+        st.subheader("Create deliverables (batch)")
+
+        all_new: List[Dict] = []
+        for i in range(1, N + 1):
+            st.markdown(f"## Deliverable {i}")
+            _ensure_block_counts(i)
+
+            # Core deliverable fields
+            d_title = st.text_input(f"[D{i}] Title *", key=f"D{i}_title")
+            c1, c2, c3, c4 = st.columns([1,1,1,2])
+            with c1: d_owner = st.text_input(f"[D{i}] Owner", key=f"D{i}_owner")
+            with c2: d_unit  = st.text_input(f"[D{i}] Unit",  key=f"D{i}_unit")
+            with c3: d_term  = st.text_input(f"[D{i}] Term",  key=f"D{i}_term", help="e.g., 2025-1 or Fall 2025")
+            with c4: d_notes = st.text_area(f"[D{i}] Notes", key=f"D{i}_notes", height=80)
+
+            # Tasks
+            st.markdown("---")
+            st.markdown(f"#### [D{i}] Tasks ({st.session_state[f'c{i}_task_count']})")
+            tasks = render_task_rows(st.session_state[f"c{i}_task_count"], base_key=f"D{i}_t", existing=None)
+
+            # Variables
+            st.markdown(f"#### [D{i}] Variables ({st.session_state[f'c{i}_var_count']})")
+            st.markdown('<div class="hint">Tip: Use variables for any extra fields (Milestone, Budget, Link...).</div>', unsafe_allow_html=True)
+            vars_list = render_var_rows(st.session_state[f"c{i}_var_count"], base_key=f"D{i}_v", existing=None)
+
+            all_new.append({
+                "_title": d_title, "_owner": d_owner, "_unit": d_unit, "_term": d_term, "_notes": d_notes,
+                "_tasks": tasks, "_vars": vars_list,
+            })
+            st.markdown("---")
+
+        submitted = st.form_submit_button("Save all deliverables")
+        if submitted:
+            ok_any = False
+            for block in all_new:
+                if not (block["_title"] or block["_owner"] or block["_unit"] or block["_term"] or block["_notes"] or block["_tasks"] or block["_vars"]):
+                    # Completely empty block → skip silently
+                    continue
+                if not (block["_title"] or "").strip():
+                    st.error("Each non-empty deliverable needs a Title. Please fill or leave the whole block empty.")
+                    return
+                new_deliv = {
+                    "id": generate_id(),
+                    "title": block["_title"].strip(),
+                    "owner": (block["_owner"] or "").strip(),
+                    "unit": (block["_unit"] or "").strip(),
+                    "term": (block["_term"] or "").strip(),
+                    "notes": (block["_notes"] or "").strip(),
+                    "created_at": datetime.utcnow().isoformat(timespec="seconds"),
+                    "tasks": block["_tasks"],
+                    "vars": block["_vars"],
+                }
+                save_deliverable(new_deliv)
+                ok_any = True
+            if ok_any:
+                st.success("Deliverables added.")
+                # reset counts and clear form
+                st.session_state["create_deliv_count"] = 1
+                st.session_state["c1_task_count"] = 3
+                st.session_state["c1_var_count"]  = 1
+                _rerun()
+            else:
+                st.info("Nothing to save — all blocks were empty.")
+
+# ------------------------------ EDIT -------------------------------
 def edit_deliverable_modal(deliv: Dict):
     t_cnt = f"edit_{deliv['id']}_task_count"
     v_cnt = f"edit_{deliv['id']}_var_count"
@@ -366,7 +410,7 @@ def edit_deliverable_modal(deliv: Dict):
         st.session_state[v_cnt] = max(1, len(deliv.get("vars", []) or []))
 
     with ui_modal("Edit deliverable"):
-        # Controls (TOP)
+        # Controls outside the form
         st.markdown("### Tasks")
         render_controls(t_cnt, base_key=f"e_{deliv['id']}_tasks", label="Task", key_suffix="top")
         st.markdown("### Custom variables")
@@ -383,13 +427,11 @@ def edit_deliverable_modal(deliv: Dict):
             with c4: d_notes = st.text_area("Deliverable notes", value=deliv.get("notes",""), height=80, key=f"e_{deliv['id']}_notes")
 
             existing_tasks = deliv.get("tasks", []) or []
-            n_tasks = st.session_state.get(t_cnt, 1)
-            tasks = render_task_rows(n_tasks, base_key=f"e_{deliv['id']}_tasks", existing=existing_tasks)
+            tasks = render_task_rows(st.session_state.get(t_cnt,1), base_key=f"e_{deliv['id']}_t", existing=existing_tasks)
 
             st.markdown(f"#### Variables ({st.session_state.get(v_cnt,1)})")
             existing_vars = deliv.get("vars", []) or []
-            n_vars = st.session_state.get(v_cnt, 1)
-            vars_list = render_var_rows(n_vars, base_key=f"e_{deliv['id']}_vars", existing=existing_vars)
+            vars_list = render_var_rows(st.session_state.get(v_cnt,1), base_key=f"e_{deliv['id']}_v", existing=existing_vars)
 
             btns = st.columns(2)
             with btns[0]:
@@ -413,43 +455,33 @@ def edit_deliverable_modal(deliv: Dict):
                 }
                 update_deliverable(updated)
                 st.success("Updated.")
-                st.session_state.pop(t_cnt, None)
-                st.session_state.pop(v_cnt, None)
+                st.session_state.pop(t_cnt, None); st.session_state.pop(v_cnt, None)
                 _rerun()
             if cancel:
-                st.session_state.pop(t_cnt, None)
-                st.session_state.pop(v_cnt, None)
+                st.session_state.pop(t_cnt, None); st.session_state.pop(v_cnt, None)
                 _rerun()
 
-        # Controls (BOTTOM)
-        render_controls(v_cnt, base_key=f"e_{deliv['id']}_vars", label="Variable", key_suffix="bottom")
-        st.markdown("---")
-
-# ----------------------------- Cards & List -------------------------
+# ------------------------------ Cards ------------------------------
 def show_deliverable_card(deliv: Dict):
     with st.expander(f"{deliv['title']} — {deliv.get('owner','')}", expanded=False):
         st.caption(f"ID: `{deliv['id']}` · created {deliv.get('created_at','')}")
         if deliv.get("notes"):
             st.markdown(f"**Notes:** {deliv['notes']}")
 
-        # Variables
         vars_list = deliv.get("vars", []) or []
         if vars_list:
             st.markdown("**Variables**")
             st.dataframe(pd.DataFrame(vars_list), use_container_width=True, hide_index=True)
 
-        # Tasks
         tasks = deliv.get("tasks", []) or []
         if not tasks:
             st.info("No tasks added.")
         else:
-            rows = []
-            for t in tasks:
-                rows.append({
-                    "#": t.get("row"), "Task": t.get("title"), "status": t.get("status"),
-                    "priority": t.get("priority"), "hours": t.get("hours"),
-                    "Due": pretty_due(t.get("due_at")), "notes": t.get("notes"),
-                })
+            rows = [{
+                "#": t.get("row"), "Task": t.get("title"), "status": t.get("status"),
+                "priority": t.get("priority"), "hours": t.get("hours"),
+                "Due": pretty_due(t.get("due_at")), "notes": t.get("notes"),
+            } for t in tasks]
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
         c1, c2, c3, _ = st.columns([1,1,1,6])
@@ -468,13 +500,13 @@ def show_deliverable_card(deliv: Dict):
                 key=f"dl_csv_{deliv['id']}",
             )
 
-# ------------------------------- Layout -----------------------------
-with st.expander("Create deliverable", expanded=False):
-    create_deliverable_form()
+# ------------------------------- Layout ----------------------------
+with st.expander("Create deliverables (infinite)", expanded=False):
+    create_deliverables_section()
 
 st.subheader("Deliverables")
 
-items = st.session_state["deliverables"]
+items  = st.session_state["deliverables"]
 terms  = sorted({(d.get("term") or "").strip()  for d in items if d.get("term")})
 owners = sorted({(d.get("owner") or "").strip() for d in items if d.get("owner")})
 
@@ -514,12 +546,14 @@ with pc3:
 
 page_items, _ = paginate(filtered, st.session_state["page"], per_page)
 
+# Launch edit modal when requested
 if st.session_state.get("edit_id"):
     ed = next((d for d in items if d["id"] == st.session_state["edit_id"]), None)
     if ed:
         edit_deliverable_modal(ed)
         st.session_state["edit_id"] = None
 
+# Delete confirm (per visible page)
 for d in page_items:
     if confirm_modal(f"Delete deliverable '{d['title']}'? This cannot be undone.",
                      "ask_delete_one", match_id=d["id"]):
