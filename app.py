@@ -1,12 +1,10 @@
-# app.py — DGCC Follow-up (clean single-file version)
-# Features:
-# • 5 tasks per deliverable (no unit on tasks)
-# • Clear divider between Notes and Tasks
-# • Task “due date” picker ONLY appears when enabled
-# • Per-deliverable Excel download button (at top of each card)
-# • Global Excel download for ALL deliverables + tasks
-# • Collapsible deliverables (arrow > to expand/collapse)
-# • “+ Add another deliverable form” to append more forms on the page
+# app.py — DGCC Follow-up (single-file)
+# Fixes added:
+# - Date picker ALWAYS visible (disabled until "Has due date?" is checked)
+# - Divider between Notes and Tasks, and between each Task row
+# - "+" button to add more deliverable forms at top AND after each form
+# - Collapsible deliverable cards with per-deliverable Excel download
+# - Global Excel download for all deliverables + tasks
 
 import sqlite3
 import io
@@ -18,8 +16,8 @@ import pandas as pd
 import streamlit as st
 
 # ---------- Page ----------
-st.set_page_config(page_title="DGCC Follow-up (Clean)", page_icon="🗂️", layout="wide")
-st.title("DGCC Follow-up (Clean)")
+st.set_page_config(page_title="DGCC Follow-up Manager", page_icon="🗂️", layout="wide")
+st.title("DGCC Follow-up")
 
 DB_PATH = Path("followup.db")
 STATUSES = ["Not started", "In progress", "Blocked", "Done"]
@@ -82,19 +80,9 @@ def insert_deliverable(**kw) -> int:
     kw.setdefault("start_date", dt.date.today().isoformat())
     kw.setdefault("last_update", dt.datetime.utcnow().isoformat())
     cols = [
-        "unit",
-        "name",
-        "owner",
-        "owner_email",
-        "notes",
-        "due_date",
-        "status",
-        "priority",
-        "category",
-        "tags",
-        "expected_hours",
-        "start_date",
-        "last_update",
+        "unit", "name", "owner", "owner_email", "notes", "due_date",
+        "status", "priority", "category", "tags", "expected_hours",
+        "start_date", "last_update",
     ]
     conn = _connect()
     cur = conn.cursor()
@@ -112,18 +100,9 @@ def insert_task(**kw) -> None:
     kw.setdefault("start_date", dt.date.today().isoformat())
     kw.setdefault("last_update", dt.datetime.utcnow().isoformat())
     cols = [
-        "deliverable_id",
-        "task",
-        "owner",
-        "notes",
-        "due_date",
-        "status",
-        "priority",
-        "tags",
-        "expected_hours",
-        "start_date",
-        "last_update",
-        "blocked_reason",
+        "deliverable_id", "task", "owner", "notes", "due_date",
+        "status", "priority", "tags", "expected_hours",
+        "start_date", "last_update", "blocked_reason",
     ]
     conn = _connect()
     cur = conn.cursor()
@@ -207,10 +186,7 @@ def _download_excel_button(filename: str, sheets: dict[str, pd.DataFrame], label
 
 
 def _task_line(task_row: Dict[str, Any]) -> str:
-    """
-    Return a single-line, space-separated summary of a task.
-    Fields (in order): task owner status priority due_date expected_hours tags blocked_reason notes
-    """
+    """One-line, space-separated task summary."""
     fields = [
         task_row.get("task"),
         task_row.get("owner"),
@@ -238,21 +214,20 @@ if "form_count" not in st.session_state:
     st.session_state.form_count = 1
 
 st.subheader("Create deliverable & 5 tasks each")
-# “+” adds another deliverable form block
-if st.button("➕ Add another deliverable form", help="Add another deliverable + 5 tasks"):
+
+# "+" button at the top
+if st.button("➕ Add another deliverable form", help="Add another deliverable + 5 tasks", key="add_top"):
     st.session_state.form_count += 1
 
-# Render N forms
 saved_any = False
+
 for form_idx in range(st.session_state.form_count):
     st.markdown(f"### Deliverable form {form_idx + 1}")
     with st.form(f"create_{form_idx}", clear_on_submit=True):
         c1, c2, c3 = st.columns(3)
         with c1:
             d_unit = st.text_input("Unit", placeholder="DGCC", key=f"unit_{form_idx}")
-            d_name = st.text_input(
-                "Deliverable title*", placeholder="e.g., Policy rollout v1", key=f"name_{form_idx}"
-            )
+            d_name = st.text_input("Deliverable title*", placeholder="e.g., Policy rollout v1", key=f"name_{form_idx}")
             d_owner = st.text_input("Owner", placeholder="Nora", key=f"owner_{form_idx}")
             d_email = st.text_input("Owner email", key=f"email_{form_idx}")
         with c2:
@@ -260,20 +235,21 @@ for form_idx in range(st.session_state.form_count):
             d_priority = st.selectbox("Priority", PRIORITIES, index=1, key=f"priority_{form_idx}")
             d_category = st.text_input("Category", placeholder="Audit / Policy / System", key=f"cat_{form_idx}")
             d_due_enabled = st.checkbox("Has due date?", key=f"due_on_{form_idx}")
-            d_due = st.date_input("Due date", value=None, key=f"due_{form_idx}") if d_due_enabled else None
         with c3:
+            # Always show date box; enable only if due is checked
+            d_due = st.date_input("Due date", value=dt.date.today(), key=f"due_{form_idx}", disabled=not d_due_enabled)
             d_tags = st.text_input("Tags (comma-separated)", key=f"tags_{form_idx}")
             d_hours = st.number_input("Expected hours", min_value=0.0, step=0.5, key=f"hrs_{form_idx}")
-            d_notes = st.text_area("Notes", height=90, key=f"notes_{form_idx}")
+        d_notes = st.text_area("Notes", height=90, key=f"notes_{form_idx}")
 
-        # —— Divider + caption before the task section
+        # Divider + caption before the task section
         st.divider()
-        st.markdown("**Tasks (5 max)**  \n_(No unit per task; each task will be shown later as a single space-separated line.)_")
+        st.markdown("**Tasks (5 max)**  \n_(No unit per task; each task is shown later as a single space-separated line.)_")
 
         task_rows = []
         for i in range(1, 6):
             # 4 columns: title/owner | status/priority | due | hours/tags/blocked
-            t1, t2, t3, t4 = st.columns([2, 1.2, 1, 1.6])
+            t1, t2, t3, t4 = st.columns([2, 1.2, 1.3, 1.7], gap="small")
             with t1:
                 t_title = st.text_input(f"Task {i} title", key=f"t{form_idx}_{i}_title")
                 t_owner = st.text_input(f"Owner {i}", key=f"t{form_idx}_{i}_owner")
@@ -282,7 +258,7 @@ for form_idx in range(st.session_state.form_count):
                 t_priority = st.selectbox(f"Priority {i}", PRIORITIES, index=0, key=f"t{form_idx}_{i}_prio")
             with t3:
                 t_due_enabled = st.checkbox("Has due date?", key=f"t{form_idx}_{i}_due_on")
-                t_due = st.date_input("Due date", value=dt.date.today(), key=f"t{form_idx}_{i}_due") if t_due_enabled else None
+                t_due = st.date_input("Due date", value=dt.date.today(), key=f"t{form_idx}_{i}_due", disabled=not t_due_enabled)
             with t4:
                 t_hours = st.number_input(f"Hours {i}", min_value=0.0, step=0.5, key=f"t{form_idx}_{i}_hrs")
                 t_tags = st.text_input(f"Tags {i}", key=f"t{form_idx}_{i}_tags")
@@ -303,6 +279,10 @@ for form_idx in range(st.session_state.form_count):
                 )
             )
 
+            # ——— divider between tasks (except after the last one)
+            if i < 5:
+                st.markdown("<hr style='margin:8px 0; opacity:0.35;'/>", unsafe_allow_html=True)
+
         submitted = st.form_submit_button("💾 Save this deliverable", type="primary")
         if submitted:
             if not d_name.strip():
@@ -314,7 +294,7 @@ for form_idx in range(st.session_state.form_count):
                     owner=d_owner or None,
                     owner_email=d_email or None,
                     notes=d_notes or None,
-                    due_date=d_due,
+                    due_date=_iso_date_or_none(d_due_enabled, d_due),
                     status=d_status,
                     priority=d_priority,
                     category=d_category or None,
@@ -328,6 +308,11 @@ for form_idx in range(st.session_state.form_count):
                         created += 1
                 st.success(f"Saved deliverable #{did} with {created} task(s).")
                 saved_any = True
+
+    # "+" button again after each form (easier to add more)
+    if st.button("➕ Add another deliverable form", key=f"add_after_{form_idx}"):
+        st.session_state.form_count += 1
+        st.experimental_rerun()
 
 if saved_any:
     st.balloons()
@@ -344,7 +329,7 @@ if dels:
             title += f'  ({d["unit"]})'
 
         with st.expander(title, expanded=False):
-            # ===== Top actions row: Download + Delete =====
+            # Top actions row: Download + Delete
             cdl, cdel, _ = st.columns([2, 1.2, 6])
             df_del = pd.DataFrame([d])
             df_tasks = pd.DataFrame(tasks) if tasks else pd.DataFrame(
@@ -364,7 +349,7 @@ if dels:
                     st.warning("Deleted. Please refresh.")
             st.markdown("---")
 
-            # ===== Summary line =====
+            # Summary line
             info_parts = []
             for label, key in [("Status", "status"), ("Priority", "priority"),
                                ("Due", "due_date"), ("Owner", "owner"),
@@ -373,7 +358,7 @@ if dels:
                     info_parts.append(f"**{label}:** {d[key]}")
             st.markdown(" • ".join(info_parts) if info_parts else "_No meta info_")
 
-            # ===== Tasks as space-separated lines =====
+            # Tasks as space-separated lines
             if tasks:
                 st.markdown("**Tasks** (each line is fields joined by spaces):")
                 lines = [_task_line(t) for t in tasks]
@@ -381,7 +366,7 @@ if dels:
             else:
                 st.info("No tasks yet for this deliverable.")
 
-    # ===== Global table + export =====
+    # Global table + export
     st.markdown("---")
     st.subheader("All deliverables (table)")
     df_all = pd.DataFrame(dels)
@@ -409,4 +394,4 @@ if dels:
         "⬇️ Download ALL deliverables (.xlsx)",
     )
 else:
-    st.info("No deliverables yet — add one above.")
+    st.info("No deliverables yet — add one above, then the ▸ arrow will appear for each.")
