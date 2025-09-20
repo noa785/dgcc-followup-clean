@@ -1,11 +1,12 @@
-# app.py — DGCC Follow-up Manager (clean, date-ready)
-# ---------------------------------------------------
+# app.py — DGCC Follow-up Manager (clean, date-ready, infinite tasks)
+# -------------------------------------------------------------------
 # Streamlit single-file app: create + manage Deliverables and Tasks.
-# - Form lives in an expander (short page)
+# - Create form lives in an expander (compact page)
 # - Filters: Term / Owner / Search + pagination
-# - Per-deliverable downloads (CSV / Excel) + global filtered downloads
+# - Per-deliverable downloads (CSV) + global filtered downloads (CSV/Excel)
 # - Edit & Delete (with modal fallback for older Streamlit)
-# - Reliable calendar (date) + time picker per task (stored as datetime)
+# - ALWAYS-SHOWN calendar (date) + time picker per task (stored as datetime)
+# - Infinite tasks via "Add Task / Remove Last Task" (Create & Edit)
 # - No external DB; everything is kept in session_state
 
 from __future__ import annotations
@@ -18,7 +19,6 @@ from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
-
 
 # ---------------------------- Page & CSS ----------------------------
 
@@ -37,13 +37,13 @@ st.markdown(
 [data-testid="stForm"] .stDateInput,
 [data-testid="stForm"] .stTimeInput { margin-bottom: .4rem; }
 .small-note { color:#6b7280; font-size:.85rem; }
+hr { border: none; border-top: 1px solid #eee; margin: .75rem 0; }
 </style>
 """,
     unsafe_allow_html=True,
 )
 
 st.title("DGCC Follow-up Manager")
-
 
 # ---------------------- Compatibility & helpers ---------------------
 
@@ -78,7 +78,6 @@ def generate_id() -> str:
 STATUS_OPTS = ["Not started", "In progress", "Blocked", "Done"]
 PRIORITY_OPTS = ["Low", "Medium", "High"]
 
-
 def split_dt(dt_val) -> Tuple[Optional[date], Optional[time]]:
     """Return (date, time) from a datetime/str/None."""
     if not dt_val:
@@ -90,7 +89,6 @@ def split_dt(dt_val) -> Tuple[Optional[date], Optional[time]]:
             return None, None
     return dt_val.date(), dt_val.time()
 
-
 def pretty_due(dt_val) -> str:
     if not dt_val:
         return "None"
@@ -100,39 +98,6 @@ def pretty_due(dt_val) -> str:
         except Exception:
             return dt_val
     return dt_val.strftime("%Y-%m-%d %H:%M")
-
-
-def task_due_controls(idx: int, initial_dt=None, keyp: str = "c") -> Tuple[bool, Optional[datetime]]:
-    """
-    Renders calendar+time controls controlled by a checkbox.
-      [ ] Has due date? idx
-          Due date idx (calendar)
-          Due time idx (time)
-    Returns: (has_due, datetime|None)
-    """
-    init_d, init_t = split_dt(initial_dt)
-    has_due_default = initial_dt is not None
-
-    has_due = st.checkbox(
-        f"Has due date? {idx}",
-        value=has_due_default,
-        key=f"{keyp}_t{idx}_has_due",
-    )
-    if has_due:
-        d = st.date_input(
-            f"Due date {idx}",
-            value=init_d or date.today(),
-            key=f"{keyp}_t{idx}_due_date",
-        )
-        t = st.time_input(
-            f"Due time {idx}",
-            value=init_t or time(9, 0),
-            key=f"{keyp}_t{idx}_due_time",
-        )
-        return True, datetime.combine(d, t)
-    else:
-        return False, None
-
 
 # -------------------------- Data structures -------------------------
 
@@ -146,7 +111,6 @@ class Task:
     due_at: Optional[datetime]
     notes: str
 
-
 @dataclass
 class Deliverable:
     id: str
@@ -158,21 +122,20 @@ class Deliverable:
     created_at: str
     tasks: List[Task]
 
-
 def ensure_state():
     if "deliverables" not in st.session_state:
         st.session_state["deliverables"] = []
-
+    # counters for dynamic tasks
+    st.session_state.setdefault("create_task_count", 3)  # start with 3 rows
+    # edit counters will be created per deliverable id lazily
 
 ensure_state()
-
 
 # ------------------------------ Exports -----------------------------
 
 def build_global_tables(items: List[Dict]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Return (deliverables_df, tasks_df, flattened_df) for a list of deliverables."""
-    d_rows = []
-    t_rows = []
+    d_rows, t_rows = [], []
     for d in items:
         d_rows.append(
             {
@@ -186,6 +149,7 @@ def build_global_tables(items: List[Dict]) -> tuple[pd.DataFrame, pd.DataFrame, 
             }
         )
         for t in d.get("tasks", []) or []:
+            due = t.get("due_at")
             t_rows.append(
                 {
                     "deliverable_id": d["id"],
@@ -195,7 +159,7 @@ def build_global_tables(items: List[Dict]) -> tuple[pd.DataFrame, pd.DataFrame, 
                     "status": t.get("status"),
                     "priority": t.get("priority"),
                     "hours": t.get("hours"),
-                    "due_at": t.get("due_at").isoformat() if t.get("due_at") else None,
+                    "due_at": due.isoformat() if isinstance(due, datetime) else (due or None),
                     "notes": t.get("notes"),
                 }
             )
@@ -221,13 +185,11 @@ def build_global_tables(items: List[Dict]) -> tuple[pd.DataFrame, pd.DataFrame, 
         )
     return df_deliv, df_tasks, df_flat
 
-
 def export_filtered_csv(items: List[Dict]) -> bytes:
     _, _, df_flat = build_global_tables(items)
     buff = io.StringIO()
     df_flat.to_csv(buff, index=False)
     return buff.getvalue().encode("utf-8")
-
 
 def export_filtered_excel(items: List[Dict]) -> bytes:
     df_deliv, df_tasks, df_flat = build_global_tables(items)
@@ -237,7 +199,6 @@ def export_filtered_excel(items: List[Dict]) -> bytes:
         df_tasks.to_excel(w, index=False, sheet_name="tasks")
         df_flat.to_excel(w, index=False, sheet_name="flattened")
     return buff.getvalue()
-
 
 def export_tasks_csv(deliv: Dict) -> bytes:
     rows = []
@@ -258,7 +219,6 @@ def export_tasks_csv(deliv: Dict) -> bytes:
     df.to_csv(s, index=False)
     return s.getvalue().encode("utf-8")
 
-
 # ------------------------------ Filters -----------------------------
 
 def filter_deliverables(items: List[Dict], term: str, owner: str, query: str) -> List[Dict]:
@@ -278,19 +238,16 @@ def filter_deliverables(items: List[Dict], term: str, owner: str, query: str) ->
         out.append(d)
     return out
 
-
 def paginate(items: List[Dict], page: int, per_page: int) -> Tuple[List[Dict], int]:
     total = len(items)
     start = (page - 1) * per_page
     end = start + per_page
     return items[start:end], total
 
-
 # --------------------------- CRUD operations ------------------------
 
 def save_deliverable(new_deliv: Dict):
     st.session_state["deliverables"].append(new_deliv)
-
 
 def update_deliverable(updated: Dict):
     for i, d in enumerate(st.session_state["deliverables"]):
@@ -298,10 +255,8 @@ def update_deliverable(updated: Dict):
             st.session_state["deliverables"][i] = updated
             return
 
-
 def delete_deliverable(deliv_id: str):
     st.session_state["deliverables"] = [d for d in st.session_state["deliverables"] if d["id"] != deliv_id]
-
 
 def confirm_modal(prompt: str, state_key: str, match_id: Optional[str] = None) -> bool:
     asked = st.session_state.get(state_key)
@@ -323,12 +278,15 @@ def confirm_modal(prompt: str, state_key: str, match_id: Optional[str] = None) -
             _rerun()
     return False
 
+# ----------------------------- UI helpers ---------------------------
 
-# ----------------------------- UI building --------------------------
-
-def build_task_row(i: int, keyp: str, initial: Optional[Dict] = None) -> Optional[Dict]:
-    """Render one task row and return task dict (or None if no title)."""
+def task_inputs(i: int, keyp: str, initial: Optional[Dict] = None) -> Optional[Dict]:
+    """
+    Render one task row (ALWAYS shows date + time pickers).
+    Returns task dict (or None if no title).
+    """
     initial = initial or {}
+
     st.markdown(f"#### Task {i} — title")
     title = st.text_input(
         f"Task {i} — title",
@@ -337,6 +295,7 @@ def build_task_row(i: int, keyp: str, initial: Optional[Dict] = None) -> Optiona
         label_visibility="collapsed",
         placeholder="Task title",
     )
+
     c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
         status = st.selectbox(
@@ -353,11 +312,37 @@ def build_task_row(i: int, keyp: str, initial: Optional[Dict] = None) -> Optiona
             key=f"{keyp}_t{i}_priority",
         )
     with c3:
-        hours = st.number_input("Hours", min_value=0.0, step=0.5, value=float(initial.get("hours") or 0), key=f"{keyp}_t{i}_hours")
+        hours = st.number_input(
+            "Hours",
+            min_value=0.0,
+            step=0.5,
+            value=float(initial.get("hours") or 0),
+            key=f"{keyp}_t{i}_hours",
+        )
 
-    has_due, due_at = task_due_controls(i, initial_dt=initial.get("due_at"), keyp=keyp)
+    # Always-on due date + time
+    init_d, init_t = split_dt(initial.get("due_at"))
+    dc1, dc2 = st.columns([1, 1])
+    with dc1:
+        d = st.date_input(
+            f"Due date {i}",
+            value=init_d or date.today(),
+            key=f"{keyp}_t{i}_due_date",
+        )
+    with dc2:
+        t = st.time_input(
+            f"Due time {i}",
+            value=init_t or time(9, 0),
+            key=f"{keyp}_t{i}_due_time",
+        )
+    due_at = datetime.combine(d, t) if d and t else None
 
-    notes = st.text_area(f"Notes {i}", value=initial.get("notes", ""), key=f"{keyp}_t{i}_notes")
+    notes = st.text_area(
+        f"Notes {i}",
+        value=initial.get("notes", ""),
+        key=f"{keyp}_t{i}_notes",
+        placeholder="Notes (optional)",
+    )
 
     if not title.strip():
         return None
@@ -367,10 +352,41 @@ def build_task_row(i: int, keyp: str, initial: Optional[Dict] = None) -> Optiona
         "status": status,
         "priority": priority,
         "hours": float(hours) if hours not in ("", None) else None,
-        "due_at": due_at if has_due else None,
+        "due_at": due_at,
         "notes": notes.strip(),
     }
 
+def render_task_block(count_key: str, base_key: str, existing: Optional[List[Dict]] = None) -> List[Dict]:
+    """
+    Renders N task rows where N = st.session_state[count_key].
+    Provides Add Task / Remove Last Task controls.
+    Returns list of valid task dicts.
+    """
+    existing = existing or []
+    n = st.session_state.get(count_key, 1)
+    tasks: List[Dict] = []
+
+    for i in range(1, n + 1):
+        initial = next((t for t in existing if t.get("row") == i), None)
+        with st.container():
+            t = task_inputs(i, keyp=f"{base_key}_{i}", initial=initial)
+            if t:
+                tasks.append(t)
+            st.markdown("<hr/>", unsafe_allow_html=True)
+
+    c1, c2, _ = st.columns([1, 1, 6])
+    with c1:
+        if st.button("Add Task", key=f"{base_key}_add"):
+            st.session_state[count_key] = min(n + 1, 50)  # hard cap 50 to prevent runaway
+            _rerun()
+    with c2:
+        if st.button("Remove Last Task", key=f"{base_key}_rem", disabled=n <= 1):
+            st.session_state[count_key] = max(n - 1, 1)
+            _rerun()
+
+    return tasks
+
+# --------------------------- Create / Edit --------------------------
 
 def create_deliverable_form():
     with st.form("create_deliv", clear_on_submit=True):
@@ -388,14 +404,8 @@ def create_deliverable_form():
             d_notes = st.text_area("Deliverable notes", height=80)
 
         st.markdown("---")
-        st.markdown("### Tasks (up to 5)")
-        tasks: List[Dict] = []
-        for i in range(1, 6):
-            with st.container():
-                t = build_task_row(i, keyp=f"c{i}")
-                if t:
-                    tasks.append(t)
-                st.markdown("---")
+        st.markdown("### Tasks (infinite)")
+        tasks = render_task_block("create_task_count", base_key="c", existing=None)
 
         submitted = st.form_submit_button("Save deliverable")
         if submitted:
@@ -414,10 +424,16 @@ def create_deliverable_form():
             }
             save_deliverable(new_deliv)
             st.success("Deliverable added.")
+            # reset create task count for next deliverable (so you can keep adding more)
+            st.session_state["create_task_count"] = 3
             _rerun()
 
-
 def edit_deliverable_modal(deliv: Dict):
+    # initialize per-deliverable edit task counter
+    cnt_key = f"edit_{deliv['id']}_count"
+    if cnt_key not in st.session_state:
+        st.session_state[cnt_key] = max(1, len(deliv.get("tasks", []) or []))
+
     with ui_modal("Edit deliverable"):
         with st.form(f"edit_{deliv['id']}"):
             st.subheader("Edit deliverable")
@@ -434,16 +450,10 @@ def edit_deliverable_modal(deliv: Dict):
                 d_notes = st.text_area("Deliverable notes", value=deliv.get("notes", ""), height=80, key=f"e_{deliv['id']}_notes")
 
             st.markdown("---")
-            st.markdown("### Tasks (up to 5)")
+            st.markdown("### Tasks (infinite)")
+
             existing = deliv.get("tasks", []) or []
-            tasks: List[Dict] = []
-            for i in range(1, 6):
-                initial = next((t for t in existing if t.get("row") == i), None)
-                with st.container():
-                    t = build_task_row(i, keyp=f"e_{deliv['id']}_{i}", initial=initial)
-                    if t:
-                        tasks.append(t)
-                    st.markdown("---")
+            tasks = render_task_block(cnt_key, base_key=f"e_{deliv['id']}", existing=existing)
 
             btns = st.columns(2)
             with btns[0]:
@@ -462,22 +472,23 @@ def edit_deliverable_modal(deliv: Dict):
                     "unit": d_unit.strip(),
                     "term": d_term.strip(),
                     "notes": d_notes.strip(),
-                    "created_at": deliv.get("created_at")
-                    or datetime.utcnow().isoformat(timespec="seconds"),
+                    "created_at": deliv.get("created_at") or datetime.utcnow().isoformat(timespec="seconds"),
                     "tasks": tasks,
                 }
                 update_deliverable(updated)
                 st.success("Updated.")
+                # drop the per-edit counter so a fresh edit re-inits from data
+                st.session_state.pop(cnt_key, None)
                 _rerun()
             if cancel:
+                st.session_state.pop(cnt_key, None)
                 _rerun()
 
+# ----------------------------- Cards & List -------------------------
 
 def show_deliverable_card(deliv: Dict):
     with st.expander(f"{deliv['title']} — {deliv.get('owner','')}", expanded=False):
-        st.caption(
-            f"ID: `{deliv['id']}` · created {deliv.get('created_at','')}"
-        )
+        st.caption(f"ID: `{deliv['id']}` · created {deliv.get('created_at','')}")
         if deliv.get("notes"):
             st.markdown(f"**Notes:** {deliv['notes']}")
 
@@ -517,7 +528,6 @@ def show_deliverable_card(deliv: Dict):
                 mime="text/csv",
                 key=f"dl_csv_{deliv['id']}",
             )
-
 
 # ------------------------------- Layout -----------------------------
 
