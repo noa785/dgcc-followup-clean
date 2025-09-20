@@ -1,4 +1,4 @@
-# app.py — DGCC Follow-up (clean, single-file, organized)
+# app.py — DGCC Follow-up (clean, with editing)
 
 import io
 import uuid
@@ -13,7 +13,7 @@ import streamlit as st
 # Page setup
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="DGCC Follow-up — Clean", page_icon="📝", layout="wide")
-st.title("📝 DGCC Follow-up — Clean")
+st.title(" DGCC Follow-up ")
 
 # Session defaults
 if "deliverables" not in st.session_state:
@@ -22,12 +22,15 @@ if "deliverables" not in st.session_state:
 if "show_new_form" not in st.session_state:
     st.session_state["show_new_form"] = True
 
+# For edit modal (stores which id is being edited)
+if "edit_id" not in st.session_state:
+    st.session_state["edit_id"] = None
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers: id, modal confirm, exports, persistence
 # ─────────────────────────────────────────────────────────────────────────────
 def generate_id() -> str:
-    """Small, URL-safe id snippet."""
     return uuid.uuid4().hex[:10]
 
 
@@ -46,7 +49,7 @@ def confirm_modal(prompt: str, state_key: str, match_id: str | None = None) -> b
     Returns True when user clicks Yes.
     """
     current = st.session_state.get(state_key)
-    if current is None or current is False:
+    if not current and current is not False:
         return False
 
     if match_id is not None and current != match_id:
@@ -92,7 +95,6 @@ def tasks_to_dataframe(tasks: List[Dict]) -> pd.DataFrame:
     df = pd.DataFrame(tasks) if tasks else pd.DataFrame(
         columns=["row", "title", "status", "priority", "hours", "due_date", "notes"]
     )
-    # order columns nicely if they exist
     cols = ["row", "title", "status", "priority", "hours", "due_date", "notes"]
     df = df[[c for c in cols if c in df.columns]]
     return df
@@ -101,7 +103,6 @@ def tasks_to_dataframe(tasks: List[Dict]) -> pd.DataFrame:
 def export_summary_csv(deliv: Dict) -> bytes:
     """CSV with a compact task list for one deliverable."""
     df = tasks_to_dataframe(deliv.get("tasks", []))
-    # include deliverable id/title in the first row as metadata
     meta = pd.DataFrame(
         [{"deliverable_id": deliv["id"], "deliverable_title": deliv["title"]}]
     )
@@ -135,7 +136,7 @@ def export_full_xlsx(deliv: Dict) -> bytes:
 
 
 def export_all_summary_csv(deliverables: List[Dict]) -> bytes:
-    """All deliverables in a two-part CSV: header rows + tasks for each."""
+    """All deliverables summarized sequentially."""
     out = io.StringIO()
     first = True
     for d in deliverables:
@@ -152,9 +153,7 @@ def export_all_summary_csv(deliverables: List[Dict]) -> bytes:
 
 
 def export_all_flattened_csv(deliverables: List[Dict]) -> bytes:
-    """
-    One big flat table: one row per task with deliverable columns repeated.
-    """
+    """One big flat table: one row per task with deliverable columns repeated."""
     rows: List[Dict] = []
     for d in deliverables:
         common = {
@@ -166,7 +165,6 @@ def export_all_flattened_csv(deliverables: List[Dict]) -> bytes:
         }
         tasks = d.get("tasks", [])
         if not tasks:
-            # include a blank line to represent deliverable without tasks
             rows.append({**common})
         else:
             for t in tasks:
@@ -182,7 +180,7 @@ def export_all_flattened_csv(deliverables: List[Dict]) -> bytes:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Build tasks from form rows
+# Build tasks
 # ─────────────────────────────────────────────────────────────────────────────
 def build_task(
     idx: int,
@@ -233,7 +231,6 @@ def create_deliverable_form():
         status_opts = ["Not started", "In progress", "Blocked", "Done"]
         prio_opts = ["Low", "Medium", "High"]
 
-        # Gather 5 tasks in a loop to avoid repetition
         task_widgets: List[Tuple] = []
         for i in range(1, 6):
             st.markdown(f"#### Task {i}")
@@ -282,6 +279,120 @@ def create_deliverable_form():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# UI: Edit deliverable (modal, up to 10 tasks)
+# ─────────────────────────────────────────────────────────────────────────────
+def edit_deliverable_modal(deliv: Dict):
+    """Open a modal with pre-filled fields and allow editing + saving."""
+    status_opts = ["Not started", "In progress", "Blocked", "Done"]
+    prio_opts = ["Low", "Medium", "High"]
+    MAX_TASKS = 10
+
+    with st.modal(f"Edit: {deliv['title']}"):
+        # Pre-fill deliverable info
+        d_title = st.text_input("Deliverable title *", value=deliv["title"], key=f"e_title_{deliv['id']}")
+        c1, c2, c3 = st.columns([1, 1, 2])
+        with c1:
+            d_owner = st.text_input("Owner", value=deliv.get("owner",""), key=f"e_owner_{deliv['id']}")
+        with c2:
+            d_unit = st.text_input("Unit", value=deliv.get("unit",""), key=f"e_unit_{deliv['id']}")
+        with c3:
+            d_notes = st.text_area("Deliverable notes", value=deliv.get("notes",""), height=80, key=f"e_notes_{deliv['id']}")
+
+        st.markdown("### Tasks (edit up to 10)")
+        # Index tasks by row number for prefilling
+        existing = {t.get("row", i+1): t for i, t in enumerate(deliv.get("tasks", []))}
+
+        task_widgets: List[Tuple] = []
+        for i in range(1, MAX_TASKS + 1):
+            t0 = existing.get(i, {})
+
+            st.markdown(f"#### Task {i}")
+            t_title = st.text_input(
+                f"Task {i} — title",
+                value=t0.get("title",""),
+                key=f"e_{deliv['id']}_t{i}_title"
+            )
+
+            cc1, cc2, cc3, cc4 = st.columns([1, 1, 1, 1])
+            with cc1:
+                t_status = st.selectbox(
+                    "Status",
+                    status_opts,
+                    index= status_opts.index(t0.get("status","Not started")) if t0.get("status") in status_opts else 0,
+                    key=f"e_{deliv['id']}_t{i}_status"
+                )
+            with cc2:
+                t_prio = st.selectbox(
+                    "Priority",
+                    prio_opts,
+                    index= prio_opts.index(t0.get("priority","Medium")) if t0.get("priority") in prio_opts else 1,
+                    key=f"e_{deliv['id']}_t{i}_prio"
+                )
+            with cc3:
+                has_due_default = t0.get("due_date") is not None
+                t_has_due = st.checkbox(
+                    "Has due date?",
+                    value=has_due_default,
+                    key=f"e_{deliv['id']}_t{i}_has_due"
+                )
+                default_due = t0.get("due_date") or date.today()
+                t_due = st.date_input(
+                    "Due date",
+                    value=default_due,
+                    disabled=not t_has_due,
+                    key=f"e_{deliv['id']}_t{i}_due"
+                )
+            with cc4:
+                t_hours = st.number_input(
+                    "Hours",
+                    min_value=0.0,
+                    step=0.5,
+                    value=float(t0.get("hours", 0.0)) if t0.get("hours") not in (None,"") else 0.0,
+                    key=f"e_{deliv['id']}_t{i}_hours"
+                )
+            t_notes = st.text_area(
+                f"Notes {i}",
+                value=t0.get("notes",""),
+                height=60,
+                key=f"e_{deliv['id']}_t{i}_notes",
+            )
+
+            task_widgets.append(
+                (i, t_title, t_status, t_hours, t_has_due, t_due, t_notes, t_prio)
+            )
+
+        c_save, c_cancel = st.columns([1,1])
+        if c_save.button("💾 Save changes"):
+            if not d_title.strip():
+                st.error("Please enter a deliverable title.")
+                st.stop()
+
+            tasks: List[Dict] = []
+            for (i, a, b, c, d, e, f, g) in task_widgets:
+                row = build_task(i, a, b, c, d, e, f, g)
+                if row:
+                    tasks.append(row)
+
+            updated = {
+                "id": deliv["id"],
+                "title": d_title.strip(),
+                "owner": d_owner.strip(),
+                "unit": d_unit.strip(),
+                "notes": d_notes.strip(),
+                "created_at": deliv.get("created_at") or datetime.utcnow().isoformat(timespec="seconds"),
+                "tasks": tasks,
+            }
+            save_deliverable(updated)
+            st.session_state["edit_id"] = None
+            st.success("Changes saved.")
+            st.rerun()
+
+        if c_cancel.button("✖ Cancel"):
+            st.session_state["edit_id"] = None
+            st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # UI: Render deliverable card (expander)
 # ─────────────────────────────────────────────────────────────────────────────
 def show_deliverable_card(deliv: Dict):
@@ -297,7 +408,7 @@ def show_deliverable_card(deliv: Dict):
             df = tasks_to_dataframe(tasks).rename(columns={"row": "#", "title": "Task", "due_date": "Due"})
             st.dataframe(df, use_container_width=True, hide_index=True)
 
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         with c1:
             st.download_button(
                 "⬇️ Summary (CSV)",
@@ -313,7 +424,10 @@ def show_deliverable_card(deliv: Dict):
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
         with c3:
-            if st.button("🗑️ Delete this deliverable", key=f"del_{deliv['id']}"):
+            if st.button("✏️ Edit", key=f"edit_{deliv['id']}"):
+                st.session_state["edit_id"] = deliv["id"]
+        with c4:
+            if st.button("🗑️ Delete", key=f"del_{deliv['id']}"):
                 st.session_state["ask_delete_one"] = deliv["id"]
 
         if confirm_modal(
@@ -372,11 +486,17 @@ if confirm_modal("Delete ALL deliverables? This cannot be undone.", "ask_delete_
     st.success("All deliverables deleted.")
     st.rerun()
 
-st.markdown("")  # small gap
+st.markdown("")
 
 if not items:
     st.info("No deliverables yet. Use the form above to add one.")
 else:
+    # If an edit was requested, open the modal for that id
+    if st.session_state.get("edit_id"):
+        ed = next((d for d in items if d["id"] == st.session_state["edit_id"]), None)
+        if ed:
+            edit_deliverable_modal(ed)
+
     for d in items:
         show_deliverable_card(d)
 
