@@ -1,378 +1,385 @@
-# app.py — DGCC Follow-up (clean, official, error-free)
+# app.py — DGCC Follow-up (clean, single-file, organized)
 
-from __future__ import annotations
 import io
 import uuid
-from datetime import date, datetime
-from typing import List, Dict, Any
+from datetime import datetime, date
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
 
 
-# ------------------------------------------------------------------------------
-# Page config and small helpers
-# ------------------------------------------------------------------------------
-st.set_page_config(
-    page_title="DGCC Follow-up (clean)",
-    page_icon="📝",
-    layout="wide",
-)
+# ─────────────────────────────────────────────────────────────────────────────
+# Page setup
+# ─────────────────────────────────────────────────────────────────────────────
+st.set_page_config(page_title="DGCC Follow-up — Clean", page_icon="📝", layout="wide")
+st.title("📝 DGCC Follow-up — Clean")
 
-def _now_str() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M")
+# Session defaults
+if "deliverables" not in st.session_state:
+    st.session_state["deliverables"] = []  # list[dict]
 
-def _new_id() -> str:
-    return uuid.uuid4().hex[:12]
-
-def _init_state():
-    if "deliverables" not in st.session_state:
-        st.session_state["deliverables"] = []  # list[dict]
-    if "show_new_form" not in st.session_state:
-        st.session_state["show_new_form"] = True
-    if "filters" not in st.session_state:
-        st.session_state["filters"] = {"q": "", "priority": "All", "owner": "All"}
-
-_init_state()
+if "show_new_form" not in st.session_state:
+    st.session_state["show_new_form"] = True
 
 
-# ------------------------------------------------------------------------------
-# Reusable confirm modal (Streamlit has no st.confirm)
-# ------------------------------------------------------------------------------
-def confirm_modal(prompt: str, state_key: str) -> bool:
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers: id, modal confirm, exports, persistence
+# ─────────────────────────────────────────────────────────────────────────────
+def generate_id() -> str:
+    """Small, URL-safe id snippet."""
+    return uuid.uuid4().hex[:10]
+
+
+def _show_form():
+    st.session_state["show_new_form"] = True
+
+
+def _hide_form():
+    st.session_state["show_new_form"] = False
+
+
+def confirm_modal(prompt: str, state_key: str, match_id: str | None = None) -> bool:
     """
-    Open a confirmation modal if st.session_state[state_key] is True.
-    Return True only when the user clicks 'Yes'.
-    Usage:
-        if st.button("Delete ..."):
-            st.session_state['ask_delete'] = True
-        if confirm_modal("Sure?", 'ask_delete'):
-            ...
+    Open a confirmation modal when st.session_state[state_key] is truthy.
+    If match_id is given, we only confirm when the stored value equals match_id.
+    Returns True when user clicks Yes.
     """
-    if st.session_state.get(state_key):
-        with st.modal("Confirm action"):
-            st.warning(prompt)
-            c1, c2 = st.columns(2)
-            yes = c1.button("✅ Yes, do it", key=f"{state_key}_yes")
-            no = c2.button("❌ Cancel", key=f"{state_key}_no")
-            if yes:
-                st.session_state[state_key] = False
-                return True
-            if no:
-                st.session_state[state_key] = False
-                st.rerun()
+    current = st.session_state.get(state_key)
+    if current is None or current is False:
+        return False
+
+    if match_id is not None and current != match_id:
+        return False
+
+    with st.modal("Confirm action"):
+        st.warning(prompt)
+        c1, c2 = st.columns(2)
+        yes = c1.button("✅ Yes, do it")
+        no = c2.button("❌ Cancel")
+
+        if yes:
+            st.session_state[state_key] = None
+            return True
+        if no:
+            st.session_state[state_key] = None
+            st.rerun()
+
     return False
 
 
-# ------------------------------------------------------------------------------
-# Data model helpers
-# ------------------------------------------------------------------------------
-Task = Dict[str, Any]
-Deliverable = Dict[str, Any]
-
-def build_deliverable(
-    unit: str,
-    title: str,
-    owner: str,
-    priority: str,
-    notes: str,
-    tasks: List[Task],
-) -> Deliverable:
-    return {
-        "id": _new_id(),
-        "created": _now_str(),
-        "unit": unit.strip(),
-        "title": title.strip(),
-        "owner": owner.strip(),
-        "priority": priority,
-        "notes": notes.strip(),
-        "tasks": tasks,
-    }
-
-def task_row_form(idx: int) -> Task:
-    """
-    Render a single task row (inline form pieces) and return its structure.
-    Leaving title empty => row ignored by caller.
-    """
-    st.markdown(f"**Task {idx+1}**")
-    cols = st.columns([3, 1.4, 1.2, 1.2])
-    title = cols[0].text_input("Title", key=f"t_title_{idx}", placeholder="Task title")
-    has_due = cols[1].checkbox("Has due date?", key=f"t_has_due_{idx}", value=False)
-    if has_due:
-        due = cols[1].date_input("Due date", key=f"t_due_{idx}", value=date.today())
+def save_deliverable(deliv: Dict) -> None:
+    """Append or replace by id."""
+    items = st.session_state["deliverables"]
+    idx = next((i for i, d in enumerate(items) if d["id"] == deliv["id"]), None)
+    if idx is None:
+        items.append(deliv)
     else:
-        # Render disabled-looking placeholder date input
-        cols[1].date_input("Due date", value=date.today(), key=f"t_due_{idx}_disabled", disabled=True)
-        due = None
+        items[idx] = deliv
 
-    status = cols[2].selectbox("Status", ["New", "In progress", "Done", "Blocked"], key=f"t_status_{idx}")
-    hours = cols[3].number_input("Hours", min_value=0.0, step=0.5, key=f"t_hours_{idx}")
 
-    notes = st.text_area("Notes", key=f"t_notes_{idx}", placeholder="Optional notes", height=80)
-    st.markdown("---")
+def delete_deliverable(deliv_id: str) -> None:
+    st.session_state["deliverables"] = [
+        d for d in st.session_state["deliverables"] if d["id"] != deliv_id
+    ]
 
-    if not title.strip():
-        return {}  # ignored
+
+def delete_all() -> None:
+    st.session_state["deliverables"] = []
+
+
+def tasks_to_dataframe(tasks: List[Dict]) -> pd.DataFrame:
+    df = pd.DataFrame(tasks) if tasks else pd.DataFrame(
+        columns=["row", "title", "status", "priority", "hours", "due_date", "notes"]
+    )
+    # order columns nicely if they exist
+    cols = ["row", "title", "status", "priority", "hours", "due_date", "notes"]
+    df = df[[c for c in cols if c in df.columns]]
+    return df
+
+
+def export_summary_csv(deliv: Dict) -> bytes:
+    """CSV with a compact task list for one deliverable."""
+    df = tasks_to_dataframe(deliv.get("tasks", []))
+    # include deliverable id/title in the first row as metadata
+    meta = pd.DataFrame(
+        [{"deliverable_id": deliv["id"], "deliverable_title": deliv["title"]}]
+    )
+    out = io.StringIO()
+    meta.to_csv(out, index=False)
+    out.write("\n")
+    df.to_csv(out, index=False)
+    return out.getvalue().encode("utf-8")
+
+
+def export_full_xlsx(deliv: Dict) -> bytes:
+    """Workbook with Deliverable sheet + Tasks sheet."""
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as xw:
+        # Deliverable
+        pd.DataFrame([{
+            "id": deliv["id"],
+            "title": deliv["title"],
+            "owner": deliv.get("owner", ""),
+            "unit": deliv.get("unit", ""),
+            "created_at": deliv.get("created_at", ""),
+            "notes": deliv.get("notes", ""),
+        }]).to_excel(xw, sheet_name="Deliverable", index=False)
+
+        # Tasks
+        df_tasks = tasks_to_dataframe(deliv.get("tasks", []))
+        df_tasks.to_excel(xw, sheet_name="Tasks", index=False)
+
+    output.seek(0)
+    return output.read()
+
+
+def export_all_summary_csv(deliverables: List[Dict]) -> bytes:
+    """All deliverables in a two-part CSV: header rows + tasks for each."""
+    out = io.StringIO()
+    first = True
+    for d in deliverables:
+        meta = pd.DataFrame(
+            [{"deliverable_id": d["id"], "deliverable_title": d["title"]}]
+        )
+        if not first:
+            out.write("\n")
+        meta.to_csv(out, index=False)
+        out.write("\n")
+        tasks_to_dataframe(d.get("tasks", [])).to_csv(out, index=False)
+        first = False
+    return out.getvalue().encode("utf-8")
+
+
+def export_all_flattened_csv(deliverables: List[Dict]) -> bytes:
+    """
+    One big flat table: one row per task with deliverable columns repeated.
+    """
+    rows: List[Dict] = []
+    for d in deliverables:
+        common = {
+            "deliverable_id": d["id"],
+            "deliverable_title": d["title"],
+            "owner": d.get("owner", ""),
+            "unit": d.get("unit", ""),
+            "created_at": d.get("created_at", ""),
+        }
+        tasks = d.get("tasks", [])
+        if not tasks:
+            # include a blank line to represent deliverable without tasks
+            rows.append({**common})
+        else:
+            for t in tasks:
+                r = {**common}
+                for k in ["row", "title", "status", "priority", "hours", "due_date", "notes"]:
+                    r[k] = t.get(k)
+                rows.append(r)
+
+    df = pd.DataFrame(rows)
+    out = io.StringIO()
+    df.to_csv(out, index=False)
+    return out.getvalue().encode("utf-8")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Build tasks from form rows
+# ─────────────────────────────────────────────────────────────────────────────
+def build_task(
+    idx: int,
+    title: str,
+    status: str,
+    hours: Optional[float],
+    has_due: bool,
+    due: Optional[date],
+    notes: str,
+    priority: str,
+) -> Optional[Dict]:
+    """
+    Returns a task dict if title is not empty, otherwise None (skip row).
+    """
+    title = (title or "").strip()
+    if not title:
+        return None
+
     return {
-        "title": title.strip(),
-        "has_due": has_due,
-        "due": str(due) if due else "",
+        "row": idx,
+        "title": title,
         "status": status,
-        "hours": float(hours or 0.0),
-        "notes": notes.strip(),
+        "hours": float(hours) if hours not in (None, "") else None,
+        "due_date": due if has_due else None,
+        "priority": priority,
+        "notes": (notes or "").strip(),
     }
 
 
-# ------------------------------------------------------------------------------
-# Export helpers
-# ------------------------------------------------------------------------------
-def to_summary_df(deliverables: List[Deliverable]) -> pd.DataFrame:
-    records = []
-    for d in deliverables:
-        records.append({
-            "ID": d["id"],
-            "Created": d["created"],
-            "Unit": d["unit"],
-            "Title": d["title"],
-            "Owner": d["owner"],
-            "Priority": d["priority"],
-            "Notes": d["notes"],
-            "Tasks_count": len(d["tasks"]),
-            "Hours_total": sum(t.get("hours", 0.0) for t in d["tasks"]),
-        })
-    if not records:
-        return pd.DataFrame(columns=["ID","Created","Unit","Title","Owner","Priority","Notes","Tasks_count","Hours_total"])
-    return pd.DataFrame(records)
-
-def to_flat_tasks_df(deliverables: List[Deliverable]) -> pd.DataFrame:
-    rows = []
-    for d in deliverables:
-        for i, t in enumerate(d["tasks"], start=1):
-            rows.append({
-                "Deliverable_ID": d["id"],
-                "Unit": d["unit"],
-                "Deliverable": d["title"],
-                "Owner": d["owner"],
-                "Priority": d["priority"],
-                "Task_no": i,
-                "Task_title": t["title"],
-                "Has_due": t["has_due"],
-                "Due": t["due"],
-                "Status": t["status"],
-                "Hours": t["hours"],
-                "Task_notes": t["notes"],
-            })
-    if not rows:
-        return pd.DataFrame(columns=[
-            "Deliverable_ID","Unit","Deliverable","Owner","Priority",
-            "Task_no","Task_title","Has_due","Due","Status","Hours","Task_notes"
-        ])
-    return pd.DataFrame(rows)
-
-def excel_for_deliverable(d: Deliverable) -> bytes:
-    """
-    Build an Excel workbook with:
-      - Summary sheet (1 row for the deliverable)
-      - Tasks sheet (all tasks with columns)
-    """
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="xlsxwriter") as xw:
-        to_summary_df([d]).to_excel(xw, index=False, sheet_name="Summary")
-        to_flat_tasks_df([d]).to_excel(xw, index=False, sheet_name="Tasks")
-    return buf.getvalue()
-
-
-# ------------------------------------------------------------------------------
-# Filtering + deletion
-# ------------------------------------------------------------------------------
-def filter_deliverables(all_items: List[Deliverable]) -> List[Deliverable]:
-    f = st.session_state["filters"]
-    q = f["q"].lower().strip()
-    pr = f["priority"]
-    ow = f["owner"]
-
-    def match(d: Deliverable) -> bool:
-        if q and (q not in d["title"].lower() and q not in d["unit"].lower() and q not in d["owner"].lower()):
-            return False
-        if pr != "All" and d["priority"] != pr:
-            return False
-        if ow != "All" and d["owner"] != ow:
-            return False
-        return True
-
-    return [d for d in all_items if match(d)]
-
-def delete_by_ids(ids: List[str]):
-    st.session_state["deliverables"] = [d for d in st.session_state["deliverables"] if d["id"] not in ids]
-
-
-# ------------------------------------------------------------------------------
-# Create form (wrapped in visibility flag)
-# ------------------------------------------------------------------------------
-def create_form():
+# ─────────────────────────────────────────────────────────────────────────────
+# UI: Create deliverable form (5 task rows)
+# ─────────────────────────────────────────────────────────────────────────────
+def create_deliverable_form():
     with st.form("new_deliverable", clear_on_submit=True):
         st.subheader("Create deliverable")
-        c1, c2, c3, c4 = st.columns([2, 2, 1.3, 2])
 
-        unit = c1.text_input("Unit", placeholder="e.g., DGCC")
-        title = c2.text_input("Deliverable title", placeholder="Brief title")
-        owner = c3.text_input("Owner", placeholder="Name/role")
-        priority = c4.selectbox("Priority", ["Low", "Medium", "High", "Critical"])
+        # Deliverable fields
+        d_title = st.text_input("Deliverable title *")
+        c1, c2, c3 = st.columns([1, 1, 2])
+        with c1:
+            d_owner = st.text_input("Owner")
+        with c2:
+            d_unit = st.text_input("Unit")
+        with c3:
+            d_notes = st.text_area("Deliverable notes", height=80)
 
-        notes = st.text_area("Notes (deliverable)", placeholder="Optional notes / description", height=90)
+        st.markdown("### Tasks (up to 5)")
+        status_opts = ["Not started", "In progress", "Blocked", "Done"]
+        prio_opts = ["Low", "Medium", "High"]
 
-        st.markdown("---")
-        st.caption("Add up to 5 tasks. Leave a task title empty to skip that row.")
-        tasks: List[Task] = []
-        for i in range(5):
-            tr = task_row_form(i)
-            if tr:
-                tasks.append(tr)
+        # Gather 5 tasks in a loop to avoid repetition
+        task_widgets: List[Tuple] = []
+        for i in range(1, 6):
+            st.markdown(f"#### Task {i}")
+            t_title = st.text_input(f"Task {i} — title", key=f"t{i}_title")
+            cc1, cc2, cc3, cc4 = st.columns([1, 1, 1, 1])
+            with cc1:
+                t_status = st.selectbox("Status", status_opts, key=f"t{i}_status")
+            with cc2:
+                t_prio = st.selectbox("Priority", prio_opts, key=f"t{i}_prio")
+            with cc3:
+                t_has_due = st.checkbox("Has due date?", key=f"t{i}_has_due")
+                t_due = st.date_input("Due date", disabled=not t_has_due, key=f"t{i}_due")
+            with cc4:
+                t_hours = st.number_input("Hours", min_value=0.0, step=0.5, key=f"t{i}_hours")
+            t_notes = st.text_area(f"Notes {i}", height=60, key=f"t{i}_notes")
+
+            task_widgets.append(
+                (i, t_title, t_status, t_hours, t_has_due, t_due, t_notes, t_prio)
+            )
 
         submitted = st.form_submit_button("Save deliverable")
+
         if submitted:
-            if not title.strip():
-                st.error("Deliverable title is required.")
-                return
-            new_d = build_deliverable(unit, title, owner, priority, notes, tasks)
-            st.session_state["deliverables"].append(new_d)
+            if not d_title.strip():
+                st.error("Please enter a deliverable title.")
+                st.stop()
+
+            tasks: List[Dict] = []
+            for (i, a, b, c, d, e, f, g) in task_widgets:
+                row = build_task(i, a, b, c, d, e, f, g)
+                if row:
+                    tasks.append(row)
+
+            new_deliv = {
+                "id": generate_id(),
+                "title": d_title.strip(),
+                "owner": d_owner.strip(),
+                "unit": d_unit.strip(),
+                "notes": d_notes.strip(),
+                "created_at": datetime.utcnow().isoformat(timespec="seconds"),
+                "tasks": tasks,
+            }
+            save_deliverable(new_deliv)
             st.success("Deliverable added.")
-            st.session_state["show_new_form"] = False
-            st.rerun()
+            _hide_form()
 
 
-# ------------------------------------------------------------------------------
-# UI renderers
-# ------------------------------------------------------------------------------
-def render_header():
-    st.markdown("## 📝 DGCC Follow-up (clean)")
-    st.caption("Create organized deliverables with up to five tasks each, export summaries, and keep your semester page compact.")
+# ─────────────────────────────────────────────────────────────────────────────
+# UI: Render deliverable card (expander)
+# ─────────────────────────────────────────────────────────────────────────────
+def show_deliverable_card(deliv: Dict):
+    with st.expander(f"📦 {deliv['title']} — {deliv.get('owner','')}", expanded=False):
+        st.caption(f"ID: `{deliv['id']}` · created {deliv.get('created_at','')}")
+        if deliv.get("notes"):
+            st.markdown(f"**Notes:** {deliv['notes']}")
 
-    # Primary controls row
-    c1, c2, c3, c4 = st.columns([2, 2, 1.5, 2])
-    c1.button("➕ Add another deliverable", key="add_top", on_click=lambda: st.session_state.update(show_new_form=True))
-
-    # Filters
-    with c2:
-        st.text_input("Search (unit/title/owner)", key=("filters", "q".split())[-1] if False else "filters_q",
-                      value=st.session_state["filters"]["q"],
-                      on_change=lambda: st.session_state["filters"].update(q=st.session_state["filters_q"]))
-    with c3:
-        st.selectbox("Priority", ["All", "Low", "Medium", "High", "Critical"], key="filters_prio",
-                     index=["All","Low","Medium","High","Critical"].index(st.session_state["filters"]["priority"]),
-                     on_change=lambda: st.session_state["filters"].update(priority=st.session_state["filters_prio"]))
-    with c4:
-        # Owners list from current data
-        owners = sorted({d["owner"] for d in st.session_state["deliverables"] if d["owner"]}) or []
-        opts = ["All"] + owners
-        chosen = st.selectbox("Owner", opts,
-                              index=opts.index(st.session_state["filters"]["owner"]) if st.session_state["filters"]["owner"] in opts else 0)
-        st.session_state["filters"]["owner"] = chosen
-
-    st.markdown("---")
-
-
-def render_table_and_global_actions(filtered: List[Deliverable]):
-    # Compact table toggle
-    compact = st.toggle("Compact table view", value=True, help="Show a simple summary table below.")
-
-    # Global downloads row
-    colA, colB, colC = st.columns([1.2, 1.2, 2])
-    summary_df = to_summary_df(filtered)
-    flat_df = to_flat_tasks_df(filtered)
-
-    csv_summary = summary_df.to_csv(index=False).encode("utf-8")
-    csv_flat = flat_df.to_csv(index=False).encode("utf-8")
-
-    colA.download_button("⬇️ All (Summary)", data=csv_summary, file_name="dgcc_followup_summary.csv", mime="text/csv")
-    colB.download_button("⬇️ All (Flattened tasks)", data=csv_flat, file_name="dgcc_followup_tasks.csv", mime="text/csv")
-
-    with colC:
-        if st.button("🗑️ Delete ALL filtered"):
-            if filtered:
-                st.session_state["ask_delete_filtered"] = True
-            else:
-                st.info("Nothing matches the current filter.")
-
-        if confirm_modal("Delete all filtered deliverables? This cannot be undone.", "ask_delete_filtered"):
-            delete_by_ids([d["id"] for d in filtered])
-            st.success("Filtered deliverables deleted.")
-            st.rerun()
-
-    if compact:
-        st.dataframe(
-            summary_df[["Created","Unit","Title","Owner","Priority","Tasks_count","Hours_total"]],
-            use_container_width=True,
-            hide_index=True,
-        )
-
-
-def render_deliverable_card(d: Deliverable):
-    with st.expander(f"📦 {d['title']}  —  {d['unit']}  •  {d['owner']}  •  {d['priority']}"):
-        st.caption(f"ID: `{d['id']}` · created {d['created']}")
-        st.markdown(f"**Notes:** {d['notes'] or '*—*'}")
-
-        # Tasks table (pretty)
-        if d["tasks"]:
-            df = pd.DataFrame(d["tasks"])
-            df = df.rename(columns={
-                "title": "Task",
-                "has_due": "Has due?",
-                "due": "Due",
-                "status": "Status",
-                "hours": "Hours",
-                "notes": "Notes",
-            })
-            st.dataframe(df, use_container_width=True, hide_index=True)
-        else:
+        tasks = deliv.get("tasks", []) or []
+        if not tasks:
             st.info("No tasks added.")
+        else:
+            df = tasks_to_dataframe(tasks).rename(columns={"row": "#", "title": "Task", "due_date": "Due"})
+            st.dataframe(df, use_container_width=True, hide_index=True)
 
-        # Per-deliverable downloads and delete
-        c1, c2, c3 = st.columns([1.2, 1.2, 1.2])
-        csv_summary = to_summary_df([d]).to_csv(index=False).encode("utf-8")
-        xls = excel_for_deliverable(d)
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.download_button(
+                "⬇️ Summary (CSV)",
+                data=export_summary_csv(deliv),
+                file_name=f"{deliv['title']}_summary.csv",
+                mime="text/csv",
+            )
+        with c2:
+            st.download_button(
+                "⬇️ Full workbook (Excel)",
+                data=export_full_xlsx(deliv),
+                file_name=f"{deliv['title']}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        with c3:
+            if st.button("🗑️ Delete this deliverable", key=f"del_{deliv['id']}"):
+                st.session_state["ask_delete_one"] = deliv["id"]
 
-        c1.download_button("⬇️ Summary (CSV)", data=csv_summary, file_name=f"{d['title'][:20]}_summary.csv", mime="text/csv")
-        c2.download_button("⬇️ Full workbook (Excel)", data=xls, file_name=f"{d['title'][:20]}_workbook.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        if c3.button("🗑️ Delete this deliverable", key=f"del_{d['id']}"):
-            st.session_state[f"ask_del_{d['id']}"] = True
-
-        if confirm_modal(f"Delete deliverable “{d['title']}”? This cannot be undone.", f"ask_del_{d['id']}"):
-            delete_by_ids([d["id"]])
+        if confirm_modal(
+            f"Delete deliverable “{deliv['title']}”? This cannot be undone.",
+            "ask_delete_one",
+            match_id=deliv["id"],
+        ):
+            delete_deliverable(deliv["id"])
             st.success("Deliverable deleted.")
             st.rerun()
 
 
-def main():
-    # Header / filters and top "Add" button
-    render_header()
+# ─────────────────────────────────────────────────────────────────────────────
+# Main layout
+# ─────────────────────────────────────────────────────────────────────────────
+# Top add button
+st.button("➕ Add another deliverable", on_click=_show_form, key="add_top")
 
-    # Create form (visible when toggled)
-    if st.session_state["show_new_form"]:
-        create_form()
-    else:
-        st.caption("Click **➕ Add another deliverable** to create a new one.")
+# Create form (toggleable)
+if st.session_state["show_new_form"]:
+    create_deliverable_form()
+else:
+    st.caption("Click **➕ Add another deliverable** to create a new one.")
 
-    st.markdown("### Deliverables")
+st.divider()
 
-    all_items = st.session_state["deliverables"]
-    filtered = filter_deliverables(all_items)
+# Deliverables section
+st.subheader("Deliverables")
 
-    # Global actions & compact table
-    render_table_and_global_actions(filtered)
+items = st.session_state["deliverables"]
 
-    # Collapsible cards
-    if not filtered:
-        st.info("No deliverables match the current filter. Use the form above to add one.")
-    else:
-        for d in filtered:
-            render_deliverable_card(d)
+# Global actions row
+g1, g2, g3 = st.columns([1, 1, 1])
+with g1:
+    st.download_button(
+        "⬇️ All (Summary)",
+        data=export_all_summary_csv(items),
+        file_name="dgcc_followup_all_summary.csv",
+        mime="text/csv",
+        disabled=not items,
+    )
+with g2:
+    st.download_button(
+        "⬇️ All (Flattened)",
+        data=export_all_flattened_csv(items),
+        file_name="dgcc_followup_all_flattened.csv",
+        mime="text/csv",
+        disabled=not items,
+    )
+with g3:
+    if st.button("🗑️ Delete ALL", disabled=not items):
+        st.session_state["ask_delete_all"] = True
 
-    # Bottom "Add" button
-    st.divider()
-    st.button("➕ Add another deliverable", key="add_bottom", on_click=lambda: st.session_state.update(show_new_form=True))
+if confirm_modal("Delete ALL deliverables? This cannot be undone.", "ask_delete_all"):
+    delete_all()
+    st.success("All deliverables deleted.")
+    st.rerun()
 
+st.markdown("")  # small gap
 
-if __name__ == "__main__":
-    main()
+if not items:
+    st.info("No deliverables yet. Use the form above to add one.")
+else:
+    for d in items:
+        show_deliverable_card(d)
+
+# Bottom add button for long pages
+st.divider()
+st.button("➕ Add another deliverable", on_click=_show_form, key="add_bottom")
