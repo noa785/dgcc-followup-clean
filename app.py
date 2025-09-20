@@ -1,4 +1,13 @@
-# app.py — DGCC Follow-up (clean single-file, multi-form + per-deliverable exports)
+# app.py — DGCC Follow-up (clean single-file version)
+# Features:
+# • 5 tasks per deliverable (no unit on tasks)
+# • Clear divider between Notes and Tasks
+# • Task “due date” picker ONLY appears when enabled
+# • Per-deliverable Excel download button (at top of each card)
+# • Global Excel download for ALL deliverables + tasks
+# • Collapsible deliverables (arrow > to expand/collapse)
+# • “+ Add another deliverable form” to append more forms on the page
+
 import sqlite3
 import io
 import datetime as dt
@@ -199,9 +208,8 @@ def _download_excel_button(filename: str, sheets: dict[str, pd.DataFrame], label
 
 def _task_line(task_row: Dict[str, Any]) -> str:
     """
-    Return a single-line, space-separated summary of a task (your request).
-    Fields included (in order): task owner status priority due_date expected_hours tags blocked_reason notes
-    Missing values are skipped; multiple spaces are collapsed visually by Streamlit monospace.
+    Return a single-line, space-separated summary of a task.
+    Fields (in order): task owner status priority due_date expected_hours tags blocked_reason notes
     """
     fields = [
         task_row.get("task"),
@@ -223,14 +231,14 @@ init_db()
 with st.sidebar:
     st.header("Options")
     due_window = st.number_input("Due soon window (days)", min_value=0, value=3, step=1)
-    st.caption("Excel download buttons appear below tables and inside each deliverable card.")
+    st.caption("Per-deliverable and global Excel downloads are available below.")
 
-# Keep how many deliverable forms we’re showing this session
+# How many deliverable forms to show this session
 if "form_count" not in st.session_state:
     st.session_state.form_count = 1
 
 st.subheader("Create deliverable & 5 tasks each")
-# Add “+” to create another deliverable segment (per your request)
+# “+” adds another deliverable form block
 if st.button("➕ Add another deliverable form", help="Add another deliverable + 5 tasks"):
     st.session_state.form_count += 1
 
@@ -248,30 +256,20 @@ for form_idx in range(st.session_state.form_count):
             d_owner = st.text_input("Owner", placeholder="Nora", key=f"owner_{form_idx}")
             d_email = st.text_input("Owner email", key=f"email_{form_idx}")
         with c2:
-            d_status = st.selectbox(
-                "Status", STATUSES, index=0, key=f"status_{form_idx}"
-            )
-            d_priority = st.selectbox(
-                "Priority", PRIORITIES, index=1, key=f"priority_{form_idx}"
-            )
-            d_category = st.text_input(
-                "Category", placeholder="Audit / Policy / System", key=f"cat_{form_idx}"
-            )
+            d_status = st.selectbox("Status", STATUSES, index=0, key=f"status_{form_idx}")
+            d_priority = st.selectbox("Priority", PRIORITIES, index=1, key=f"priority_{form_idx}")
+            d_category = st.text_input("Category", placeholder="Audit / Policy / System", key=f"cat_{form_idx}")
             d_due_enabled = st.checkbox("Has due date?", key=f"due_on_{form_idx}")
-            d_due = st.date_input(
-                "Due date",
-                value=None,
-                disabled=not d_due_enabled,
-                key=f"due_{form_idx}",
-            )
+            d_due = st.date_input("Due date", value=None, key=f"due_{form_idx}") if d_due_enabled else None
         with c3:
             d_tags = st.text_input("Tags (comma-separated)", key=f"tags_{form_idx}")
-            d_hours = st.number_input(
-                "Expected hours", min_value=0.0, step=0.5, key=f"hrs_{form_idx}"
-            )
+            d_hours = st.number_input("Expected hours", min_value=0.0, step=0.5, key=f"hrs_{form_idx}")
             d_notes = st.text_area("Notes", height=90, key=f"notes_{form_idx}")
 
-        st.markdown("**Tasks (5 max):** _(No unit per task; each task shown later as a single space-separated line)_")
+        # —— Divider + caption before the task section
+        st.divider()
+        st.markdown("**Tasks (5 max)**  \n_(No unit per task; each task will be shown later as a single space-separated line.)_")
+
         task_rows = []
         for i in range(1, 6):
             # 4 columns: title/owner | status/priority | due | hours/tags/blocked
@@ -280,30 +278,15 @@ for form_idx in range(st.session_state.form_count):
                 t_title = st.text_input(f"Task {i} title", key=f"t{form_idx}_{i}_title")
                 t_owner = st.text_input(f"Owner {i}", key=f"t{form_idx}_{i}_owner")
             with t2:
-                t_status = st.selectbox(
-                    f"Status {i}", STATUSES, index=0, key=f"t{form_idx}_{i}_status"
-                )
-                t_priority = st.selectbox(
-                    f"Priority {i}", PRIORITIES, index=0, key=f"t{form_idx}_{i}_prio"
-                )
+                t_status = st.selectbox(f"Status {i}", STATUSES, index=0, key=f"t{form_idx}_{i}_status")
+                t_priority = st.selectbox(f"Priority {i}", PRIORITIES, index=0, key=f"t{form_idx}_{i}_prio")
             with t3:
-                t_due_enabled = st.checkbox(
-                    f"Due {i}?", key=f"t{form_idx}_{i}_due_on"
-                )
-                t_due = st.date_input(
-                    f"Due {i}",
-                    value=None,
-                    disabled=not t_due_enabled,
-                    key=f"t{form_idx}_{i}_due",
-                )
+                t_due_enabled = st.checkbox("Has due date?", key=f"t{form_idx}_{i}_due_on")
+                t_due = st.date_input("Due date", value=dt.date.today(), key=f"t{form_idx}_{i}_due") if t_due_enabled else None
             with t4:
-                t_hours = st.number_input(
-                    f"Hours {i}", min_value=0.0, step=0.5, key=f"t{form_idx}_{i}_hrs"
-                )
+                t_hours = st.number_input(f"Hours {i}", min_value=0.0, step=0.5, key=f"t{form_idx}_{i}_hrs")
                 t_tags = st.text_input(f"Tags {i}", key=f"t{form_idx}_{i}_tags")
-                t_blocked = st.text_input(
-                    f"Blocked reason {i}", key=f"t{form_idx}_{i}_blk"
-                )
+                t_blocked = st.text_input(f"Blocked reason {i}", key=f"t{form_idx}_{i}_blk")
             t_notes = st.text_area(f"Notes {i}", key=f"t{form_idx}_{i}_notes")
 
             task_rows.append(
@@ -331,7 +314,7 @@ for form_idx in range(st.session_state.form_count):
                     owner=d_owner or None,
                     owner_email=d_email or None,
                     notes=d_notes or None,
-                    due_date=_iso_date_or_none(d_due_enabled, d_due),
+                    due_date=d_due,
                     status=d_status,
                     priority=d_priority,
                     category=d_category or None,
@@ -350,24 +333,47 @@ if saved_any:
     st.balloons()
 
 # ---------- Display ----------
-st.subheader("Deliverables (cards with tasks)")
+st.subheader("Deliverables (click the ▸ arrow to expand)")
 
 dels = fetch_deliverables()
 if dels:
     for d in dels:
         tasks = fetch_tasks_for(d["id"])
-        header = f'#{d["id"]} — {d["name"]}  ({d["unit"]})' if d.get("unit") else f'#{d["id"]} — {d["name"]}'
-        with st.expander(header, expanded=False):
-            # Quick info row
-            info = []
-            if d.get("status"): info.append(f'**Status:** {d["status"]}')
-            if d.get("priority"): info.append(f'**Priority:** {d["priority"]}')
-            if d.get("due_date"): info.append(f'**Due:** {d["due_date"]}')
-            if d.get("owner"): info.append(f'**Owner:** {d["owner"]}')
-            if d.get("owner_email"): info.append(f'**Email:** {d["owner_email"]}')
-            st.markdown(" • ".join(info) if info else "_No meta info_")
+        title = f'#{d["id"]} — {d["name"]}'
+        if d.get("unit"):
+            title += f'  ({d["unit"]})'
 
-            # TASKS AS SPACE-SEPARATED LINES (what you asked)
+        with st.expander(title, expanded=False):
+            # ===== Top actions row: Download + Delete =====
+            cdl, cdel, _ = st.columns([2, 1.2, 6])
+            df_del = pd.DataFrame([d])
+            df_tasks = pd.DataFrame(tasks) if tasks else pd.DataFrame(
+                columns=[
+                    "id","deliverable_id","task","owner","status","priority","due_date",
+                    "expected_hours","tags","blocked_reason","notes","start_date","last_update"
+                ])
+            with cdl:
+                _download_excel_button(
+                    f"deliverable_{d['id']}.xlsx",
+                    {"Deliverable": df_del, "Tasks": df_tasks},
+                    "⬇️ Download this deliverable (.xlsx)",
+                )
+            with cdel:
+                if st.button(f"🗑️ Delete #{d['id']}", key=f"del_{d['id']}"):
+                    delete_deliverable(d["id"])
+                    st.warning("Deleted. Please refresh.")
+            st.markdown("---")
+
+            # ===== Summary line =====
+            info_parts = []
+            for label, key in [("Status", "status"), ("Priority", "priority"),
+                               ("Due", "due_date"), ("Owner", "owner"),
+                               ("Email", "owner_email")]:
+                if d.get(key):
+                    info_parts.append(f"**{label}:** {d[key]}")
+            st.markdown(" • ".join(info_parts) if info_parts else "_No meta info_")
+
+            # ===== Tasks as space-separated lines =====
             if tasks:
                 st.markdown("**Tasks** (each line is fields joined by spaces):")
                 lines = [_task_line(t) for t in tasks]
@@ -375,29 +381,7 @@ if dels:
             else:
                 st.info("No tasks yet for this deliverable.")
 
-            # Per-deliverable Excel export (deliverable + its tasks)
-            df_del = pd.DataFrame([d])
-            df_tasks = pd.DataFrame(tasks) if tasks else pd.DataFrame(
-                columns=[
-                    "id","deliverable_id","task","owner","status","priority","due_date",
-                    "expected_hours","tags","blocked_reason","notes","start_date","last_update"
-                ])
-            _download_excel_button(
-                f"deliverable_{d['id']}.xlsx",
-                {"Deliverable": df_del, "Tasks": df_tasks},
-                "⬇️ Download this deliverable (.xlsx)",
-            )
-
-            # Danger action for this deliverable
-            cdel1, cdel2 = st.columns([1, 4])
-            with cdel1:
-                if st.button(f"🗑️ Delete #{d['id']}", key=f"del_{d['id']}"):
-                    delete_deliverable(d["id"])
-                    st.warning("Deleted. Please refresh.")
-            with cdel2:
-                st.caption("Deleting removes the deliverable and its tasks.")
-
-    # “All deliverables” table + export
+    # ===== Global table + export =====
     st.markdown("---")
     st.subheader("All deliverables (table)")
     df_all = pd.DataFrame(dels)
@@ -417,6 +401,7 @@ if dels:
         cols = [c for c in cols if c in df_all.columns]
     else:
         cols = list(df_all.columns)
+
     st.dataframe(df_all[cols], use_container_width=True)
     _download_excel_button(
         "deliverables.xlsx",
