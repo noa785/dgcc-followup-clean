@@ -1,13 +1,5 @@
-# app.py — DGCC Follow-up Manager (infinite deliverables, tasks limited to 5)
-# ---------------------------------------------------------------------------
-# Streamlit single-file app: create + manage Deliverables and Tasks.
-# - Create section: add/remove as MANY deliverables as needed
-# - Each deliverable: up to 5 tasks (title, status, priority, hours, optional due date+time, notes)
-# - Filters: Term / Owner / Search + pagination
-# - Per-deliverable downloads (CSV) + global filtered downloads (CSV/Excel)
-# - Edit & Delete (with modal fallback for older Streamlit)
-# - No external DB; everything is kept in session_state
-
+# app.py — DGCC Follow-up Manager (infinite deliverables, tasks ≤ 5, dates always visible)
+# ----------------------------------------------------------------------------------------
 from __future__ import annotations
 
 import io
@@ -18,7 +10,6 @@ from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
-
 
 # ---------------------------- Page & CSS ----------------------------
 
@@ -102,38 +93,6 @@ def pretty_due(dt_val) -> str:
     return dt_val.strftime("%Y-%m-%d %H:%M")
 
 
-def task_due_controls(idx: int, initial_dt=None, keyp: str = "c") -> Tuple[bool, Optional[datetime]]:
-    """
-    Renders calendar+time controls controlled by a checkbox.
-      [ ] Has due date? idx
-          Due date idx (calendar)
-          Due time idx (time)
-    Returns: (has_due, datetime|None)
-    """
-    init_d, init_t = split_dt(initial_dt)
-    has_due_default = initial_dt is not None
-
-    has_due = st.checkbox(
-        f"Has due date? {idx}",
-        value=has_due_default,
-        key=f"{keyp}_t{idx}_has_due",
-    )
-    if has_due:
-        d = st.date_input(
-            f"Due date {idx}",
-            value=init_d or date.today(),
-            key=f"{keyp}_t{idx}_due_date",
-        )
-        t = st.time_input(
-            f"Due time {idx}",
-            value=init_t or time(9, 0),
-            key=f"{keyp}_t{idx}_due_time",
-        )
-        return True, datetime.combine(d, t)
-    else:
-        return False, None
-
-
 # -------------------------- Data structures -------------------------
 
 @dataclass
@@ -164,7 +123,6 @@ class Deliverable:
 def ensure_state():
     if "deliverables" not in st.session_state:
         st.session_state["deliverables"] = []
-
     # How many deliverable blocks are visible in Create section
     st.session_state.setdefault("create_deliv_count", 1)
 
@@ -328,7 +286,41 @@ def confirm_modal(prompt: str, state_key: str, match_id: Optional[str] = None) -
     return False
 
 
-# ----------------------------- UI building --------------------------
+# ------------------------ Task inputs (dates visible) ----------------
+
+def task_due_controls(idx: int, initial_dt=None, keyp: str = "c") -> Tuple[bool, Optional[datetime]]:
+    """
+    ALWAYS show Date + Time pickers so it's clear the date exists.
+    If 'No due date' is checked, we ignore the pickers and store None.
+    Returns: (has_due, datetime|None)
+    """
+    init_d, init_t = split_dt(initial_dt)
+
+    col_date, col_time, col_none = st.columns([1, 1, 1.2])
+    with col_date:
+        d = st.date_input(
+            f"Due date {idx}",
+            value=init_d or date.today(),
+            key=f"{keyp}_t{idx}_due_date",
+        )
+    with col_time:
+        t = st.time_input(
+            f"Due time {idx}",
+            value=init_t or time(9, 0),
+            key=f"{keyp}_t{idx}_due_time",
+        )
+    with col_none:
+        no_due = st.checkbox(
+            f"No due date {idx}",
+            value=(initial_dt is None),
+            key=f"{keyp}_t{idx}_no_due",
+        )
+
+    if no_due:
+        return False, None
+    else:
+        return True, datetime.combine(d, t)
+
 
 def build_task_row(i: int, keyp: str, initial: Optional[Dict] = None) -> Optional[Dict]:
     """Render one task row (max 5 per deliverable) and return task dict (or None if no title)."""
@@ -376,6 +368,8 @@ def build_task_row(i: int, keyp: str, initial: Optional[Dict] = None) -> Optiona
     }
 
 
+# ----------------------- Create (many deliverables) ------------------
+
 def create_deliverables_section():
     # 1) Controls to add/remove deliverable blocks (outside the form)
     c1, c2, _ = st.columns([1, 1, 6])
@@ -412,7 +406,7 @@ def create_deliverables_section():
             st.markdown("---")
             st.markdown(f"### [D{i}] Tasks (up to 5)")
             tasks: List[Dict] = []
-            for trow in range(1, 6):  # FIXED: only 1..5 tasks per deliverable
+            for trow in range(1, 6):  # FIXED: 1..5 tasks per deliverable
                 with st.container():
                     t = build_task_row(trow, keyp=f"D{i}", initial=None)
                     if t:
@@ -455,6 +449,8 @@ def create_deliverables_section():
             else:
                 st.info("Nothing to save — all blocks were empty.")
 
+
+# ------------------------------ Edit modal --------------------------
 
 def edit_deliverable_modal(deliv: Dict):
     with ui_modal("Edit deliverable"):
@@ -511,6 +507,8 @@ def edit_deliverable_modal(deliv: Dict):
             if cancel:
                 _rerun()
 
+
+# ------------------------------ Card view ---------------------------
 
 def show_deliverable_card(deliv: Dict):
     with st.expander(f"{deliv['title']} — {deliv.get('owner','')}", expanded=False):
