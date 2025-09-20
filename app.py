@@ -1,35 +1,37 @@
-# app.py — DGCC Follow-up (clean, professional)
-# -------------------------------------------------
-# Single file. No external database; uses session state.
-# You can wire DB persistence later inside save/update/delete helpers.
+# app.py — DGCC Follow-up (clean, searchable, downloadable, no variables panel)
 
 from __future__ import annotations
 
-from typing import List, Dict, Optional, Tuple
-from datetime import datetime, date
 import io
-import uuid
+import json
+from datetime import datetime, date
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
 
+
 # ──────────────────────────────────────────────────────────────────────────────
-# Page setup and compact CSS
+# Page + compact CSS
 # ──────────────────────────────────────────────────────────────────────────────
+
 st.set_page_config(page_title="DGCC Follow-up Manager", layout="wide")
 
 st.markdown(
     """
 <style>
-/* Narrower content and tighter spacing */
-.block-container { max-width: 1100px; }
+/* Tighter form spacing inside forms */
 [data-testid="stForm"] .stTextInput,
 [data-testid="stForm"] .stTextArea,
 [data-testid="stForm"] .stSelectbox,
 [data-testid="stForm"] .stNumberInput,
 [data-testid="stForm"] .stDateInput { margin-bottom: .35rem; }
+
+/* Visible border around expanders so it feels card-like */
 .stExpander { border: 1px solid #e5e7eb; border-radius: 12px; }
-.small-note { color:#6b7280; font-size:.9rem; margin-top:.35rem; }
+
+/* Page width */
+.block-container { max-width: 1100px; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -37,71 +39,61 @@ st.markdown(
 
 st.title("DGCC Follow-up — Clean")
 
+
 # ──────────────────────────────────────────────────────────────────────────────
-# Session state bootstrap
+# Fixed choices (no Variables panel)
 # ──────────────────────────────────────────────────────────────────────────────
-if "deliverables" not in st.session_state:
-    st.session_state["deliverables"] = []
 
 if "vars" not in st.session_state:
     st.session_state["vars"] = {
-        "status": ["Not started", "In progress", "Blocked", "Done"],
+        "status":   ["Not started", "In progress", "Blocked", "Done"],
         "priority": ["Low", "Medium", "High"],
-        "owners": [],
+        "owners":   [],  # put names here if you want a dropdown
     }
 
-if "create_open" not in st.session_state:
-    st.session_state["create_open"] = False
+# Deliverables storage
+if "deliverables" not in st.session_state:
+    st.session_state["deliverables"] = []
 
-if "open_ids" not in st.session_state:
-    st.session_state["open_ids"] = set()
+# UI state
+st.session_state.setdefault("page", 1)
+st.session_state.setdefault("edit_id", None)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Utility helpers
+# Helpers (IDs, filtering, paging, confirm, exports)
 # ──────────────────────────────────────────────────────────────────────────────
+
 def generate_id() -> str:
-    return uuid.uuid4().hex[:10]
+    """Short unique ID."""
+    return datetime.utcnow().strftime("%y%m%d%H%M%S%f")[-10:]
 
-def save_deliverable(item: Dict) -> None:
-    """Append to in-memory list (replace with DB insert if needed)."""
-    st.session_state["deliverables"].append(item)
 
-def update_deliverable(updated: Dict) -> None:
-    items = st.session_state["deliverables"]
-    for i, d in enumerate(items):
-        if d["id"] == updated["id"]:
-            items[i] = updated
-            break
+def confirm_modal(prompt: str, state_key: str, match_id: Optional[str] = None) -> bool:
+    """
+    Simple yes/no confirm using a modal.
+    Set st.session_state[state_key] = True (or the id) to open it.
+    If match_id is provided, the modal is shown only if state value == match_id.
+    """
+    token = st.session_state.get(state_key)
+    if token is False or token is None:
+        return False
+    if match_id is not None and token != match_id:
+        return False
 
-def delete_deliverable(deliv_id: str) -> None:
-    items = st.session_state["deliverables"]
-    st.session_state["deliverables"] = [d for d in items if d["id"] != deliv_id]
-    # Also remove from "open" set
-    st.session_state["open_ids"].discard(deliv_id)
+    with st.modal("Please confirm"):
+        st.warning(prompt)
+        c1, c2 = st.columns([1, 1])
+        yes = c1.button("Yes, continue")
+        no = c2.button("Cancel")
+        if yes:
+            st.session_state[state_key] = False
+            return True
+        if no:
+            st.session_state[state_key] = False
+            st.rerun()
+    return False
 
-def build_task(
-    idx: int,
-    title: str,
-    status: str,
-    hours: Optional[float],
-    has_due: bool,
-    due: Optional[date],
-    notes: str,
-    priority: str,
-) -> Optional[Dict]:
-    """Return a task dict if title is not empty; otherwise None (skip row)."""
-    title = (title or "").strip()
-    if not title:
-        return None
-    return {
-        "row": idx,
-        "title": title,
-        "status": status,
-        "priority": priority,
-        "hours": float(hours) if hours not in (None, "") else None,
-        "due_date": due if has_due else None,
-        "notes": (notes or "").strip(),
-    }
 
 def filter_deliverables(items: List[Dict], term: str, owner: str, query: str) -> List[Dict]:
     term = (term or "").strip().lower()
@@ -120,383 +112,356 @@ def filter_deliverables(items: List[Dict], term: str, owner: str, query: str) ->
         out.append(d)
     return out
 
+
 def paginate(items: List[Dict], page: int, per_page: int) -> Tuple[List[Dict], int]:
     total = len(items)
     start = (page - 1) * per_page
     end = start + per_page
     return items[start:end], total
 
-def expand_all(ids: List[str]) -> None:
-    st.session_state["open_ids"] = set(ids)
 
-def collapse_all() -> None:
-    st.session_state["open_ids"] = set()
+def build_task(
+    idx: int,
+    title: str,
+    status: str,
+    hours: Optional[float],
+    has_due: bool,
+    due: Optional[date],
+    notes: str,
+    priority: str,
+) -> Optional[Dict]:
+    """Return a task dict if title is not empty; otherwise None (skip row)."""
+    title = (title or "").strip()
+    if not title:
+        return None
 
-def confirm_modal(prompt: str, state_key: str, match_id: Optional[str] = None) -> bool:
-    """
-    Simple modal confirmation.
-    - set st.session_state[state_key] = True or = <id> before calling.
-    - If match_id is given, only opens when state equals that id.
-    """
-    test_val = st.session_state.get(state_key)
-    if match_id is not None and test_val != match_id:
-        return False
-    if test_val:
-        with st.modal("Confirm action"):
-            st.warning(prompt)
-            c1, c2 = st.columns(2)
-            yes = c1.button("Yes, proceed")
-            no = c2.button("Cancel")
-            if yes:
-                st.session_state[state_key] = None
-                return True
-            if no:
-                st.session_state[state_key] = None
-                st.rerun()
-    return False
+    return {
+        "row": idx,
+        "title": title,
+        "status": status,
+        "priority": priority,
+        "hours": float(hours) if hours not in (None, "") else None,
+        "due_date": due if has_due else None,
+        "notes": (notes or "").strip(),
+    }
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Export helpers
-# ──────────────────────────────────────────────────────────────────────────────
+
+# ── per-deliverable exports ───────────────────────────────────────────────────
+
 def export_summary_csv(deliv: Dict) -> bytes:
+    """Single deliverable → flattened task CSV."""
     rows = []
-    if deliv.get("tasks"):
-        for t in deliv["tasks"]:
-            rows.append(
-                {
-                    "deliverable_id": deliv["id"],
-                    "deliverable_title": deliv["title"],
-                    "task_row": t.get("row"),
-                    "task_title": t.get("title"),
-                    "status": t.get("status"),
-                    "priority": t.get("priority"),
-                    "hours": t.get("hours"),
-                    "due_date": t.get("due_date"),
-                    "notes": t.get("notes"),
-                }
-            )
+    for t in deliv.get("tasks", []) or []:
+        rows.append({
+            "deliverable_id": deliv["id"],
+            "deliverable_title": deliv.get("title", ""),
+            "row": t.get("row"),
+            "task": t.get("title"),
+            "status": t.get("status"),
+            "priority": t.get("priority"),
+            "hours": t.get("hours"),
+            "due_date": t.get("due_date"),
+            "notes": t.get("notes"),
+        })
     df = pd.DataFrame(rows)
-    buff = io.StringIO()
-    df.to_csv(buff, index=False)
-    return buff.getvalue().encode("utf-8")
+    out = io.StringIO()
+    df.to_csv(out, index=False)
+    return out.getvalue().encode("utf-8")
+
 
 def export_full_xlsx(deliv: Dict) -> bytes:
+    """Single deliverable → Excel with 2 sheets: meta, tasks."""
+    meta = pd.DataFrame([{
+        "id": deliv["id"],
+        "title": deliv.get("title", ""),
+        "owner": deliv.get("owner", ""),
+        "unit": deliv.get("unit", ""),
+        "term": deliv.get("term", ""),
+        "created_at": deliv.get("created_at", ""),
+        "notes": deliv.get("notes", ""),
+    }])
+    tasks = pd.DataFrame(deliv.get("tasks", []) or [])
     buff = io.BytesIO()
-    with pd.ExcelWriter(buff, engine="xlsxwriter") as writer:
-        # Deliverable info
-        info = pd.DataFrame(
-            [
-                {
-                    "id": deliv["id"],
-                    "title": deliv["title"],
-                    "owner": deliv.get("owner", ""),
-                    "unit": deliv.get("unit", ""),
-                    "term": deliv.get("term", ""),
-                    "created_at": deliv.get("created_at", ""),
-                    "notes": deliv.get("notes", ""),
-                }
-            ]
-        )
-        info.to_excel(writer, index=False, sheet_name="deliverable")
-
-        # Tasks
-        tasks = pd.DataFrame(deliv.get("tasks", []))
-        tasks.to_excel(writer, index=False, sheet_name="tasks")
+    with pd.ExcelWriter(buff, engine="xlsxwriter") as w:
+        meta.to_excel(w, index=False, sheet_name="deliverable")
+        tasks.to_excel(w, index=False, sheet_name="tasks")
     return buff.getvalue()
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Variables panel (status/priority/owners)
-# ──────────────────────────────────────────────────────────────────────────────
-def variables_panel():
-    with st.expander("Variables", expanded=False):
-        st.caption("Edit the lists used in forms. Use comma-separated values.")
-        with st.form("vars_form", clear_on_submit=False):
-            v = st.session_state["vars"]
-            status_csv = st.text_input("Status options", ", ".join(v["status"]))
-            priority_csv = st.text_input("Priority options", ", ".join(v["priority"]))
-            owners_csv = st.text_input("Owners (optional)", ", ".join(v.get("owners", [])))
-            saved = st.form_submit_button("Save variables")
-            if saved:
-                st.session_state["vars"] = {
-                    "status": [s.strip() for s in status_csv.split(",") if s.strip()],
-                    "priority": [s.strip() for s in priority_csv.split(",") if s.strip()],
-                    "owners": [s.strip() for s in owners_csv.split(",") if s.strip()],
-                }
-                st.success("Variables saved.")
 
-variables_panel()
+# ── global (filtered) exports ─────────────────────────────────────────────────
+
+def build_global_tables(items: List[Dict]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Return (deliverables_df, tasks_df, flattened_df) for a list of deliverables."""
+    d_rows = []
+    for d in items:
+        d_rows.append({
+            "id": d["id"],
+            "title": d.get("title", ""),
+            "owner": d.get("owner", ""),
+            "unit": d.get("unit", ""),
+            "term": d.get("term", ""),
+            "created_at": d.get("created_at", ""),
+            "notes": d.get("notes", ""),
+        })
+    df_deliv = pd.DataFrame(d_rows)
+
+    t_rows = []
+    for d in items:
+        for t in d.get("tasks", []) or []:
+            t_rows.append({
+                "deliverable_id": d["id"],
+                "deliverable_title": d.get("title", ""),
+                "row": t.get("row"),
+                "title": t.get("title"),
+                "status": t.get("status"),
+                "priority": t.get("priority"),
+                "hours": t.get("hours"),
+                "due_date": t.get("due_date"),
+                "notes": t.get("notes"),
+            })
+    df_tasks = pd.DataFrame(t_rows)
+
+    df_flat = df_tasks.copy() if len(df_tasks) else pd.DataFrame(
+        columns=[
+            "deliverable_id", "deliverable_title", "row", "title", "status",
+            "priority", "hours", "due_date", "notes"
+        ]
+    )
+    return df_deliv, df_tasks, df_flat
+
+
+def export_filtered_csv(items: List[Dict]) -> bytes:
+    """Summary CSV of all filtered tasks."""
+    _, _, df_flat = build_global_tables(items)
+    buff = io.StringIO()
+    df_flat.to_csv(buff, index=False)
+    return buff.getvalue().encode("utf-8")
+
+
+def export_filtered_excel(items: List[Dict]) -> bytes:
+    """Excel workbook with 3 sheets: deliverables, tasks, flattened."""
+    df_deliv, df_tasks, df_flat = build_global_tables(items)
+    buff = io.BytesIO()
+    with pd.ExcelWriter(buff, engine="xlsxwriter") as w:
+        df_deliv.to_excel(w, index=False, sheet_name="deliverables")
+        df_tasks.to_excel(w, index=False, sheet_name="tasks")
+        df_flat.to_excel(w, index=False, sheet_name="flattened")
+    return buff.getvalue()
+
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Create deliverable (collapsible)
+# Create / Edit / Delete logic
 # ──────────────────────────────────────────────────────────────────────────────
-st.button("Add deliverable", on_click=lambda: st.session_state.__setitem__("create_open", True))
 
-def create_deliverable_form():
-    status_options = st.session_state["vars"]["status"]
-    priority_options = st.session_state["vars"]["priority"]
-    owner_options = [""] + st.session_state["vars"].get("owners", [])
+def save_deliverable(obj: Dict) -> None:
+    st.session_state["deliverables"].append(obj)
 
+
+def replace_deliverable(updated: Dict) -> None:
+    items = st.session_state["deliverables"]
+    for i, d in enumerate(items):
+        if d["id"] == updated["id"]:
+            items[i] = updated
+            break
+
+
+def delete_deliverable(deliv_id: str) -> None:
+    items = st.session_state["deliverables"]
+    st.session_state["deliverables"] = [d for d in items if d["id"] != deliv_id]
+
+
+def create_deliverable_form() -> None:
+    """Form inside an expander. Adds one deliverable with up to 5 tasks."""
     with st.form("new_deliverable", clear_on_submit=True):
         st.subheader("Create deliverable")
 
-        # Deliverable level fields
-        title = st.text_input("Deliverable title *")
+        # Deliverable fields
+        d_title = st.text_input("Deliverable title *")
         c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
         with c1:
-            owner = st.selectbox("Owner", owner_options)
+            d_owner = st.text_input("Owner")
         with c2:
-            unit = st.text_input("Unit")
+            d_unit = st.text_input("Unit")
         with c3:
-            term = st.text_input("Term", help="e.g., 2025–1 or Fall 2025")
+            d_term = st.text_input("Term", help="Example: 2025-1 or Fall 2025")
         with c4:
-            notes = st.text_area("Deliverable notes", height=80)
+            d_notes = st.text_area("Deliverable notes", height=72)
 
-        st.markdown("### Tasks (up to 5)")
-        st.caption("Leave a task title empty to skip that row.")
+        st.markdown("#### Tasks (up to 5)")
 
-        # We generate 5 task rows using keys t{idx}_*
-        for idx in range(1, 6):
-            st.markdown(f"**Task {idx}**")
-            t_title = st.text_input("Title", key=f"t{idx}_title")
-            cols = st.columns([1, 1, 1, 1])
-            with cols[0]:
-                st.selectbox("Status", status_options, key=f"t{idx}_status")
-            with cols[1]:
-                st.selectbox("Priority", priority_options, key=f"t{idx}_priority")
-            with cols[2]:
-                st.checkbox("Has due date?", key=f"t{idx}_has_due")
-                st.date_input("Due date", disabled=not st.session_state.get(f"t{idx}_has_due"), key=f"t{idx}_due")
-            with cols[3]:
-                st.number_input("Hours", min_value=0.0, step=0.5, key=f"t{idx}_hours")
-            st.text_area("Notes", height=60, key=f"t{idx}_notes")
-            st.divider()
+        def task_row(idx: int, prefix: str):
+            t_title = st.text_input(f"Task {idx} — title", key=f"{prefix}_title")
+            cc1, cc2, cc3, cc4 = st.columns([1, 1, 1, 1])
+            with cc1:
+                t_status = st.selectbox(
+                    "Status",
+                    st.session_state["vars"]["status"],
+                    key=f"{prefix}_status",
+                    index=0,
+                )
+            with cc2:
+                t_priority = st.selectbox(
+                    "Priority",
+                    st.session_state["vars"]["priority"],
+                    key=f"{prefix}_priority",
+                    index=1,
+                )
+            with cc3:
+                t_has_due = st.checkbox("Has due date?", key=f"{prefix}_has_due")
+                t_due = st.date_input("Due date", key=f"{prefix}_due", disabled=not t_has_due)
+            with cc4:
+                t_hours = st.number_input("Hours", min_value=0.0, step=0.5, key=f"{prefix}_hours")
+            t_notes = st.text_area("Notes", height=56, key=f"{prefix}_notes")
+            return t_title, t_status, t_priority, t_has_due, t_due, t_hours, t_notes
 
-        col_a, col_b = st.columns([1, 1])
-        save_close = col_a.form_submit_button("Save and close")
-        save_again = col_b.form_submit_button("Save and add another")
+        rows = []
+        for i in range(1, 6):
+            rows.append(task_row(i, f"t{i}"))
 
-        if save_close or save_again:
-            if not title.strip():
+        submitted = st.form_submit_button("Save deliverable")
+        if submitted:
+            if not d_title.strip():
                 st.error("Please enter a deliverable title.")
                 st.stop()
 
             tasks: List[Dict] = []
-            for idx in range(1, 6):
-                task = build_task(
-                    idx,
-                    st.session_state.get(f"t{idx}_title"),
-                    st.session_state.get(f"t{idx}_status"),
-                    st.session_state.get(f"t{idx}_hours"),
-                    st.session_state.get(f"t{idx}_has_due"),
-                    st.session_state.get(f"t{idx}_due"),
-                    st.session_state.get(f"t{idx}_notes"),
-                    st.session_state.get(f"t{idx}_priority"),
-                )
-                if task:
-                    tasks.append(task)
+            for i, row in enumerate(rows, start=1):
+                t_title, t_status, t_priority, t_has_due, t_due, t_hours, t_notes = row
+                t = build_task(i, t_title, t_status, t_hours, t_has_due, t_due, t_notes, t_priority)
+                if t:
+                    tasks.append(t)
 
             new_deliv = {
                 "id": generate_id(),
-                "title": title.strip(),
-                "owner": (owner or "").strip(),
-                "unit": unit.strip(),
-                "term": term.strip(),
-                "notes": notes.strip(),
+                "title": d_title.strip(),
+                "owner": d_owner.strip(),
+                "unit": d_unit.strip(),
+                "term": d_term.strip(),
+                "notes": d_notes.strip(),
                 "created_at": datetime.utcnow().isoformat(timespec="seconds"),
                 "tasks": tasks,
             }
             save_deliverable(new_deliv)
-            st.success("Deliverable saved.")
+            st.success("Deliverable added.")
 
-            if save_close:
-                st.session_state["create_open"] = False
-                st.rerun()
-            else:
-                st.session_state["create_open"] = True
-                st.rerun()
 
-with st.expander("Create deliverable", expanded=st.session_state["create_open"]):
-    create_deliverable_form()
+def edit_deliverable_modal(deliv: Dict) -> None:
+    """Inline modal editor for a deliverable and its tasks."""
+    with st.modal(f"Edit deliverable — {deliv.get('title','')}"):
+        with st.form(f"edit_{deliv['id']}"):
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Edit modal
-# ──────────────────────────────────────────────────────────────────────────────
-def edit_deliverable_modal(deliv: Dict):
-    status_options = st.session_state["vars"]["status"]
-    priority_options = st.session_state["vars"]["priority"]
-    owner_options = [""] + st.session_state["vars"].get("owners", [])
-
-    with st.modal(f"Edit — {deliv['title']}"):
-        with st.form(f"edit_form_{deliv['id']}", clear_on_submit=False):
-            title = st.text_input("Deliverable title *", value=deliv.get("title", ""))
+            d_title = st.text_input("Deliverable title *", value=deliv.get("title", ""))
             c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
             with c1:
-                owner = st.selectbox("Owner", owner_options, index=(owner_options.index(deliv.get("owner","")) if deliv.get("owner","") in owner_options else 0))
+                d_owner = st.text_input("Owner", value=deliv.get("owner", ""))
             with c2:
-                unit = st.text_input("Unit", value=deliv.get("unit", ""))
+                d_unit = st.text_input("Unit", value=deliv.get("unit", ""))
             with c3:
-                term = st.text_input("Term", value=deliv.get("term", ""))
+                d_term = st.text_input("Term", value=deliv.get("term", ""))
             with c4:
-                notes = st.text_area("Deliverable notes", value=deliv.get("notes", ""), height=80)
+                d_notes = st.text_area("Deliverable notes", value=deliv.get("notes", ""), height=72)
 
-            st.markdown("### Tasks (up to 5)")
-            tasks = deliv.get("tasks", []) or []
+            st.markdown("#### Tasks")
 
-            # Render 5 rows; prefill with existing by row number if present
-            existing_by_row = {t["row"]: t for t in tasks if "row" in t}
+            existing = deliv.get("tasks", []) or []
+            # ensure we show up to 5 rows
+            while len(existing) < 5:
+                existing.append({})
+
+            rows = []
             for idx in range(1, 6):
-                t = existing_by_row.get(idx, {})
-                st.markdown(f"**Task {idx}**")
-                st.text_input("Title", value=t.get("title", ""), key=f"e_{deliv['id']}_t{idx}_title")
-                cols = st.columns([1, 1, 1, 1])
-                with cols[0]:
-                    st.selectbox("Status", status_options, index=(status_options.index(t.get("status","Not started")) if t.get("status") in status_options else 0), key=f"e_{deliv['id']}_t{idx}_status")
-                with cols[1]:
-                    st.selectbox("Priority", priority_options, index=(priority_options.index(t.get("priority","Low")) if t.get("priority") in priority_options else 0), key=f"e_{deliv['id']}_t{idx}_priority")
-                with cols[2]:
-                    has_due = t.get("due_date") is not None
-                    st.checkbox("Has due date?", value=has_due, key=f"e_{deliv['id']}_t{idx}_has_due")
-                    st.date_input(
-                        "Due date",
-                        value=t.get("due_date"),
-                        disabled=not st.session_state.get(f"e_{deliv['id']}_t{idx}_has_due"),
-                        key=f"e_{deliv['id']}_t{idx}_due",
+                t = existing[idx - 1] or {}
+                t_title = st.text_input(f"Task {idx} — title", value=t.get("title", ""), key=f"e_{deliv['id']}_title_{idx}")
+                cc1, cc2, cc3, cc4 = st.columns([1, 1, 1, 1])
+                with cc1:
+                    t_status = st.selectbox(
+                        "Status", st.session_state["vars"]["status"],
+                        index=(st.session_state["vars"]["status"].index(t.get("status"))
+                               if t.get("status") in st.session_state["vars"]["status"] else 0),
+                        key=f"e_{deliv['id']}_status_{idx}",
                     )
-                with cols[3]:
-                    st.number_input("Hours", min_value=0.0, step=0.5, value=(float(t.get("hours")) if t.get("hours") not in (None, "") else 0.0), key=f"e_{deliv['id']}_t{idx}_hours")
-                st.text_area("Notes", value=t.get("notes", ""), height=60, key=f"e_{deliv['id']}_t{idx}_notes")
-                st.divider()
+                with cc2:
+                    t_priority = st.selectbox(
+                        "Priority", st.session_state["vars"]["priority"],
+                        index=(st.session_state["vars"]["priority"].index(t.get("priority"))
+                               if t.get("priority") in st.session_state["vars"]["priority"] else 1),
+                        key=f"e_{deliv['id']}_priority_{idx}",
+                    )
+                with cc3:
+                    base_has_due = bool(t.get("due_date"))
+                    t_has_due = st.checkbox("Has due date?", value=base_has_due, key=f"e_{deliv['id']}_has_due_{idx}")
+                    t_due = st.date_input(
+                        "Due date",
+                        value=(t.get("due_date") or date.today()),
+                        disabled=not t_has_due,
+                        key=f"e_{deliv['id']}_due_{idx}",
+                    )
+                with cc4:
+                    t_hours = st.number_input(
+                        "Hours", min_value=0.0, step=0.5,
+                        value=float(t.get("hours") or 0.0),
+                        key=f"e_{deliv['id']}_hours_{idx}",
+                    )
+                t_notes = st.text_area("Notes", value=t.get("notes", ""), height=56, key=f"e_{deliv['id']}_notes_{idx}")
 
-            col1, col2 = st.columns([1, 1])
-            save_btn = col1.form_submit_button("Save changes")
-            cancel_btn = col2.form_submit_button("Cancel")
+                rows.append((t_title, t_status, t_priority, t_has_due, t_due, t_hours, t_notes))
 
-            if save_btn:
-                if not title.strip():
+            saved = st.form_submit_button("Save changes")
+            if saved:
+                if not d_title.strip():
                     st.error("Please enter a deliverable title.")
                     st.stop()
 
-                new_tasks: List[Dict] = []
-                for idx in range(1, 6):
-                    task = build_task(
-                        idx,
-                        st.session_state.get(f"e_{deliv['id']}_t{idx}_title"),
-                        st.session_state.get(f"e_{deliv['id']}_t{idx}_status"),
-                        st.session_state.get(f"e_{deliv['id']}_t{idx}_hours"),
-                        st.session_state.get(f"e_{deliv['id']}_t{idx}_has_due"),
-                        st.session_state.get(f"e_{deliv['id']}_t{idx}_due"),
-                        st.session_state.get(f"e_{deliv['id']}_t{idx}_notes"),
-                        st.session_state.get(f"e_{deliv['id']}_t{idx}_priority"),
-                    )
-                    if task:
-                        new_tasks.append(task)
+                tasks: List[Dict] = []
+                for i, row in enumerate(rows, start=1):
+                    t_title, t_status, t_priority, t_has_due, t_due, t_hours, t_notes = row
+                    t = build_task(i, t_title, t_status, t_hours, t_has_due, t_due, t_notes, t_priority)
+                    if t:
+                        tasks.append(t)
 
                 updated = {
                     "id": deliv["id"],
-                    "title": title.strip(),
-                    "owner": (owner or "").strip(),
-                    "unit": unit.strip(),
-                    "term": term.strip(),
-                    "notes": notes.strip(),
+                    "title": d_title.strip(),
+                    "owner": d_owner.strip(),
+                    "unit": d_unit.strip(),
+                    "term": d_term.strip(),
+                    "notes": d_notes.strip(),
                     "created_at": deliv.get("created_at") or datetime.utcnow().isoformat(timespec="seconds"),
-                    "tasks": new_tasks,
+                    "tasks": tasks,
                 }
-                update_deliverable(updated)
-                st.success("Changes saved.")
+                replace_deliverable(updated)
+                st.success("Saved.")
+                st.session_state["edit_id"] = None
                 st.rerun()
 
-            if cancel_btn:
-                st.rerun()
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Deliverables list — filters, pagination, expand/collapse all
-# ──────────────────────────────────────────────────────────────────────────────
-st.subheader("Deliverables")
-
-terms = sorted({(d.get("term") or "").strip() for d in st.session_state["deliverables"] if d.get("term")})
-owners = sorted({(d.get("owner") or "").strip() for d in st.session_state["deliverables"] if d.get("owner")})
-
-fc1, fc2, fc3, fc4 = st.columns([1, 1, 2, 1])
-with fc1:
-    f_term = st.selectbox("Term", [""] + terms, index=0)
-with fc2:
-    f_owner = st.selectbox("Owner", [""] + owners, index=0)
-with fc3:
-    f_query = st.text_input("Search", help="title / unit / notes")
-with fc4:
-    per_page = st.selectbox("Per page", [5, 10, 20, 50], index=1)
-
-all_items = st.session_state["deliverables"]
-filtered = filter_deliverables(all_items, f_term, f_owner, f_query)
-
-if "page" not in st.session_state:
-    st.session_state["page"] = 1
-
-# reset page if filters change could be added; minimal approach
-pages = max(1, (len(filtered) - 1) // per_page + 1)
-st.session_state["page"] = min(st.session_state["page"], pages)
-
-pc1, pc2, pc3 = st.columns([1, 1, 6])
-with pc1:
-    if st.button("Prev", disabled=st.session_state["page"] <= 1):
-        st.session_state["page"] -= 1
-with pc2:
-    if st.button("Next", disabled=st.session_state["page"] >= pages):
-        st.session_state["page"] += 1
-with pc3:
-    st.caption(f"Page {st.session_state['page']} / {pages} • {len(filtered)} match(es)")
-
-page_items, _ = paginate(filtered, st.session_state["page"], per_page)
-
-# Expand / Collapse all for the current page
-page_ids = [d["id"] for d in page_items]
-ec1, ec2, _ = st.columns([1, 1, 6])
-with ec1:
-    st.button("Expand all", on_click=lambda: expand_all(page_ids))
-with ec2:
-    st.button("Collapse all", on_click=collapse_all)
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Card rendering
-# ──────────────────────────────────────────────────────────────────────────────
-def show_deliverable_card(deliv: Dict):
-    is_open = deliv["id"] in st.session_state["open_ids"]
-
-    with st.expander(f"{deliv['title']} — {deliv.get('owner','')}", expanded=is_open):
-        # Keep it in the open set while it's visible
-        st.session_state["open_ids"].add(deliv["id"])
-
-        st.caption(f"ID: `{deliv['id']}` • Created {deliv.get('created_at','')}")
-        meta = []
-        if deliv.get("unit"): meta.append(f"Unit: {deliv['unit']}")
-        if deliv.get("term"): meta.append(f"Term: {deliv['term']}")
-        if meta:
-            st.write(" • ".join(meta))
+def show_deliverable_card(deliv: Dict) -> None:
+    with st.expander(f"{deliv.get('title','')} — {deliv.get('owner','')}", expanded=False):
+        st.caption(f"ID: {deliv['id']}  •  created {deliv.get('created_at','')}")
         if deliv.get("notes"):
             st.markdown(f"**Notes:** {deliv['notes']}")
 
-        # Tasks table
         tasks = deliv.get("tasks", []) or []
         if not tasks:
             st.info("No tasks added.")
         else:
             df = pd.DataFrame(tasks)
             cols = ["row", "title", "status", "priority", "hours", "due_date", "notes"]
-            df = df[[c for c in cols if c in df.columns]]
+            cols = [c for c in cols if c in df.columns]
             st.dataframe(
-                df.rename(columns={"row": "#", "title": "Task", "due_date": "Due"}),
+                df[cols].rename(columns={"row": "#", "title": "Task", "due_date": "Due"}),
                 use_container_width=True,
                 hide_index=True,
             )
 
-        # Actions: download / edit / delete
-        c1, c2, c3 = st.columns([1, 1, 1])
+        c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
         with c1:
             st.download_button(
                 "Summary (CSV)",
                 data=export_summary_csv(deliv),
                 file_name=f"{deliv['title']}_summary.csv",
                 mime="text/csv",
+                key=f"dl_csv_{deliv['id']}",
             )
         with c2:
             st.download_button(
@@ -504,15 +469,17 @@ def show_deliverable_card(deliv: Dict):
                 data=export_full_xlsx(deliv),
                 file_name=f"{deliv['title']}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=f"dl_xlsx_{deliv['id']}",
             )
         with c3:
-            colx, coly = st.columns(2)
-            if colx.button("Edit", key=f"edit_{deliv['id']}"):
+            if st.button("Edit", key=f"edit_{deliv['id']}"):
                 st.session_state["edit_id"] = deliv["id"]
-            if coly.button("Delete", key=f"del_{deliv['id']}"):
+                st.rerun()
+        with c4:
+            if st.button("Delete", key=f"del_{deliv['id']}"):
                 st.session_state["ask_delete_one"] = deliv["id"]
 
-        # Confirm delete modal
+        # Confirm delete
         if confirm_modal(
             f"Delete deliverable '{deliv['title']}'? This cannot be undone.",
             "ask_delete_one",
@@ -522,14 +489,77 @@ def show_deliverable_card(deliv: Dict):
             st.success("Deliverable deleted.")
             st.rerun()
 
-# Show edit modal if requested
-if st.session_state.get("edit_id"):
-    to_edit = next((d for d in all_items if d["id"] == st.session_state["edit_id"]), None)
-    if to_edit:
-        edit_deliverable_modal(to_edit)
-    st.session_state["edit_id"] = None
 
-# Render list
+# ──────────────────────────────────────────────────────────────────────────────
+# Layout
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Create form in collapsible expander
+with st.expander("Create deliverable", expanded=False):
+    create_deliverable_form()
+
+st.subheader("Deliverables")
+
+# Filters + pagination
+terms = sorted({(d.get("term") or "").strip() for d in st.session_state["deliverables"] if d.get("term")})
+owners = sorted({(d.get("owner") or "").strip() for d in st.session_state["deliverables"] if d.get("owner")})
+
+fc1, fc2, fc3, fc4 = st.columns([1, 1, 2, 1])
+with fc1:
+    f_term = st.selectbox("Term", [""] + terms, index=0)
+with fc2:
+    f_owner = st.selectbox("Owner", [""] + owners, index=0)
+with fc3:
+    f_query = st.text_input("Search", help="title / unit / notes")   # Search bar
+with fc4:
+    per_page = st.selectbox("Per page", [5, 10, 20, 50], index=1)
+
+items = st.session_state["deliverables"]
+filtered = filter_deliverables(items, f_term, f_owner, f_query)
+
+# Global download of filtered
+dl1, dl2, _ = st.columns([1, 1, 6])
+with dl1:
+    st.download_button(
+        "Download filtered — CSV",
+        data=export_filtered_csv(filtered),
+        file_name="deliverables_filtered_summary.csv",
+        mime="text/csv",
+        key="dl_filtered_csv",
+    )
+with dl2:
+    st.download_button(
+        "Download filtered — Excel",
+        data=export_filtered_excel(filtered),
+        file_name="deliverables_filtered.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="dl_filtered_xlsx",
+    )
+
+# Pagination controls
+pages = max(1, (len(filtered) - 1) // per_page + 1)
+st.session_state["page"] = min(st.session_state["page"], pages)
+
+pc1, pc2, pc3 = st.columns([1, 1, 6])
+with pc1:
+    if st.button("Prev", disabled=st.session_state["page"] <= 1):
+        st.session_state["page"] -= 1
+        st.rerun()
+with pc2:
+    if st.button("Next", disabled=st.session_state["page"] >= pages):
+        st.session_state["page"] += 1
+        st.rerun()
+with pc3:
+    st.caption(f"Page {st.session_state['page']} / {pages} • {len(filtered)} match(es)")
+
+page_items, _ = paginate(filtered, st.session_state["page"], per_page)
+
+# Open edit modal if needed
+if st.session_state.get("edit_id"):
+    ed = next((d for d in items if d["id"] == st.session_state["edit_id"]), None)
+    if ed:
+        edit_deliverable_modal(ed)
+
 if not page_items:
     st.info("No deliverables match the current filters.")
 else:
